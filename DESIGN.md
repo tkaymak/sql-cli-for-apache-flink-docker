@@ -47,20 +47,21 @@ Docker Desktop on student laptops often has only 4 GB, so optional parts use **c
 |---|---|---|---|---|---|
 | `kafka` | (core) | `apache/kafka:4.1.1` | 29092 → 29092 | 512m | ~250 MB |
 | `kafka-init` | (core) | `apache/kafka:4.1.1` | – | 256m | exits after a few seconds |
-| `jobmanager` | (core) | `flink:2.2.1-scala_2.12-java17` (official image, no build) | 8081 → 8081 | 768m | ~430–480 MB |
-| `taskmanager` | (core) | `flink:2.2.1-scala_2.12-java17` (official image, no build) | – | 1536m | ~520–690 MB (≈750 MB while a Beam Kafka pipeline runs; KafkaIO runs embedded in the TaskManager JVM) |
+| `jobmanager` | (core) | `flink:2.2.1-scala_2.12-java17` (official image, no build) | 8081 → 8081 | 1024m | ~610 MB (~720 MB after Beam jobs: the job-server jar is uploaded as a blob, page cache counts) |
+| `taskmanager` | (core) | `flink:2.2.1-scala_2.12-java17` (official image, no build) | – | 1536m | ~650–740 MB (≈780 MB while a Beam Kafka pipeline runs; KafkaIO runs embedded in the TaskManager JVM) |
 | `sql-client` | (core) | build: context `./sql-client`, `args: FAKER_JAR_URL: ${FAKER_JAR_URL:-https://github.com/tkaymak/flink-faker/releases/download/v0.6.0/flink-faker-0.6.0.jar}`, `image: flink-playground-sql-client:2.2.1` | – | 512m | ~6 MB idle (JVM only while a client session runs) |
-| `console` | `ui`, `all` | `redpandadata/console:v3.12.0` | 8080 → 8080 | 128m | ~50 MB |
-| `schema-registry` | `avro`, `all` | `confluentinc/cp-schema-registry:8.2.4` | 8085 → 8085 | 512m | ~300 MB (estimate with 256 MB heap; the elephant measures it) |
-| `postgres` | `postgres`, `all` | `postgres:18.6` | **5433** → 5432 | 256m | ~40 MB |
-| `beam-client` | `beam`, `all` | build: context `./beam`, `image: flink-playground-beam:2.76.0` | – | 1536m | idle ~20–40 MB; ~750 MB while a pipeline runs (Python + Beam job-server JVM; the expansion-service JVM only lives during pipeline construction) |
+| `console` | `ui`, `all` | `redpandadata/console:v3.12.0` | 8080 → 8080 | 192m | ~70–115 MB |
+| `schema-registry` | `avro`, `all` | `confluentinc/cp-schema-registry:8.2.4` | 8085 → 8085 | 512m | ~110–260 MB (measured) |
+| `postgres` | `postgres`, `all` | `postgres:18.6` | **5433** → 5432 | 256m | ~20–75 MB |
+| `beam-client` | `beam`, `all` | build: context `./beam`, `image: flink-playground-beam:2.76.0` | – | 1536m | idle ~20–40 MB; ~770–805 MB while a pipeline runs (Python + Beam job-server JVM; the expansion-service JVM only lives during pipeline construction) |
 
-- **Memory (measured on Docker Desktop, arm64, 2026-10-03):** core with 4 concurrent streaming SQL jobs ≈ **1.6 GB** (before tuning: ≈ 2.0 GB). Modules are switched on only when needed:
-  - `ui` +50 MB
-  - `avro` +~300 MB
-  - `postgres` +40 MB
-  - `beam` +0.6–1 GB while a pipeline runs
+- **Memory (measured on Docker Desktop, arm64, clean run 2026-10-03, Revision 8):** core with examples 02+03 ≈ **1.6 GB** (kafka 345 MB, jobmanager 610 MB, taskmanager 654 MB, sql-client 6 MB). Modules are switched on only when needed:
+  - `ui` +70–115 MB
+  - `avro` +110–260 MB
+  - `postgres` +20–75 MB
+  - `beam` +~0.8 GB (beam-client) and +~0.1 GB (taskmanager) while a pipeline runs
 
+  Everything at once (all SQL examples + both Beam pipelines) measured ≈ **2.9 GB**.
   `--profile all` fits a 4 GB Docker host, but 6 GB is recommended when Beam is used together with several SQL jobs. `mem_limit` is an upper bound per container (OOM protection), not a reservation.
 - Learners switch modules on/off with profiles: `docker compose --profile ui up -d` starts the UI, and `docker compose stop console` frees its RAM again. A default selection can be put into `.env` as `COMPOSE_PROFILES=ui,avro`. Provide **`.env.example`** (exact content):
   ```
