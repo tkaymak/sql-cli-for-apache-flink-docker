@@ -35,7 +35,7 @@ This document is the **single source of truth**. Implement exactly what is speci
 | Beam Java SDK (source of the Java `boot`) | `apache/beam_java17_sdk:2.76.0` (directory `/opt/apache/beam` contains `boot`, `jars`, `options`, `LICENSE`, `NOTICE`, `third_party_licenses`) |
 | Beam Flink job server jar | `https://repo1.maven.org/maven2/org/apache/beam/beam-runners-flink-2.2-job-server/2.76.0/beam-runners-flink-2.2-job-server-2.76.0.jar` (exists; Beam 2.76.0 supports Flink 2.0/2.1/2.2) |
 | Beam IO expansion service jar | `https://repo1.maven.org/maven2/org/apache/beam/beam-sdks-java-io-expansion-service/2.76.0/beam-sdks-java-io-expansion-service-2.76.0.jar` |
-| Beam Python package | `apache-beam==2.76.0` on `python:3.12-slim`, plus `openjdk-17-jre-headless` (the Python SDK runs in LOOPBACK mode inside `beam-client`; no separate worker-pool image) |
+| Beam Python package | `apache-beam==2.76.0` on `python:3.12-slim-bookworm`, plus `openjdk-17-jre-headless` (the Python SDK runs in LOOPBACK mode inside `beam-client`; no separate worker-pool image) |
 
 Elasticsearch is **removed** (there is no Flink 2.x connector).
 
@@ -204,7 +204,7 @@ exec "${FLINK_HOME}/bin/sql-client.sh" embedded -l "${SQL_CLIENT_HOME}/lib" "$@"
 ```
 
 **`beam/Dockerfile`** (build context `./beam`, used by `beam-client`):
-- `FROM python:3.12-slim`.
+- `FROM python:3.12-slim-bookworm` (G5 finding, accepted: the floating `python:3.12-slim` tag is Debian 13 "trixie", which has no `openjdk-17-jre-headless`; bookworm has it).
 - `RUN apt-get update && apt-get install -y --no-install-recommends openjdk-17-jre-headless wget ca-certificates && rm -rf /var/lib/apt/lists/*`.
 - `RUN pip install --no-cache-dir apache-beam==2.76.0`.
 - `RUN set -eux; mkdir -p /opt/beam/jars; cd /opt/beam/jars; wget -q <job-server jar URL from §2>; wget -q <expansion jar URL from §2>`. Keep the original Maven file names (`beam-runners-flink-2.2-job-server-2.76.0.jar`, `beam-sdks-java-io-expansion-service-2.76.0.jar`); §3.6 relies on them.
