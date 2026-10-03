@@ -21,5 +21,8 @@ CREATE TEMPORARY TABLE orders_faker (
   'fields.order_time.expression' = '#{date.past ''5'',''SECONDS''}'
 );
 
--- Gibt die ersten 10 generierten Datensätze im Tableau-Modus aus und beendet danach die Abfrage.
-SELECT * FROM orders_faker LIMIT 10;
+-- Begrenztes Lesen via Dynamic Table Option 'number-of-rows' = '10':
+-- Ein unbegrenztes 'SELECT ... LIMIT 10' beendet den Streaming-Job nicht (run-example.sh würde hängen).
+-- Durch den Hint stoppt Faker nach 10 Zeilen und der SQL-Client beendet sich sauber.
+-- Die unbegrenzte Variante läuft im interaktiven Client endlos weiter und wird mit Strg+C gestoppt.
+SELECT * FROM orders_faker /*+ OPTIONS('number-of-rows' = '10') */;

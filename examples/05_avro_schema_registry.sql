@@ -37,5 +37,9 @@ CREATE TEMPORARY TABLE orders_avro (
 -- 3. Streaming-Job: Schreibt Daten im Avro-Format nach Kafka und registriert das Schema automatisch in der Schema Registry.
 INSERT INTO orders_avro SELECT order_id, customer, product, amount, order_time FROM orders_faker;
 
--- 4. Verifikation: Liest 5 Avro-Datensätze aus dem Kafka-Topic aus und gibt sie im Tableau-Modus aus.
-SELECT * FROM orders_avro LIMIT 5;
+-- 4. Verifikation mit begrenztem Lesen via Dynamic Table Options:
+-- Ein einfaches 'SELECT ... LIMIT 5' beendet den Streaming-Job nicht (run-example.sh würde hängen).
+-- Durch 'scan.bounded.mode' = 'specific-offsets' liest Flink exakt die ersten 5 Datensätze (Offsets 0-4)
+-- von Partition 0 und beendet die Abfrage anschliessend sauber.
+-- Die unbegrenzte Variante läuft im interaktiven Client endlos weiter und wird mit Strg+C gestoppt.
+SELECT * FROM orders_avro /*+ OPTIONS('scan.bounded.mode' = 'specific-offsets', 'scan.bounded.specific-offsets' = 'partition:0,offset:5') */;
