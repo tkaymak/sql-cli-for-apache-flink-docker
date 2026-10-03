@@ -49,7 +49,7 @@ services:
   jobmanager:
     container_name: jobmanager
     image: flink:2.2.1-scala_2.12-java17
-    mem_limit: 768m
+    mem_limit: 1024m
     restart: unless-stopped
     ports:
       - "8081:8081"
@@ -123,7 +123,7 @@ services:
       - ui
       - all
     image: redpandadata/console:v3.12.0
-    mem_limit: 128m
+    mem_limit: 192m
     ports:
       - "8080:8080"
     environment:
