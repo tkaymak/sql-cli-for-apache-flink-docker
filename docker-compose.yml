@@ -52,6 +52,7 @@ services:
       context: ./flink
     image: flink-playground-flink:2.2.1
     mem_limit: 768m
+    restart: unless-stopped
     ports:
       - "8081:8081"
     command: jobmanager
@@ -64,7 +65,7 @@ services:
         jobmanager.memory.jvm-overhead.min: 64m
         jobmanager.memory.jvm-overhead.max: 64m
         parallelism.default: 1
-        env.java.opts.all: -XX:+UseSerialGC -XX:TieredStopAtLevel=1 -XX:ReservedCodeCacheSize=48m -Xss512k
+      FLINK_ENV_JAVA_OPTS_JM: "-XX:+UseSerialGC -XX:TieredStopAtLevel=1 -XX:ReservedCodeCacheSize=48m -Xss512k"
     depends_on:
       kafka-init:
         condition: service_completed_successfully
@@ -75,6 +76,7 @@ services:
       context: ./flink
     image: flink-playground-flink:2.2.1
     mem_limit: 1536m
+    restart: unless-stopped
     command: taskmanager
     environment:
       FLINK_PROPERTIES: |
@@ -90,7 +92,7 @@ services:
         taskmanager.memory.jvm-overhead.min: 64m
         taskmanager.memory.jvm-overhead.max: 64m
         parallelism.default: 1
-        env.java.opts.all: -XX:+UseSerialGC -XX:TieredStopAtLevel=1 -XX:ReservedCodeCacheSize=48m -Xss512k
+      FLINK_ENV_JAVA_OPTS_TM: "-XX:+UseSerialGC -XX:TieredStopAtLevel=1 -XX:ReservedCodeCacheSize=48m -Xss512k"
     depends_on:
       jobmanager:
         condition: service_started
@@ -110,7 +112,7 @@ services:
         rest.address: jobmanager
         rest.port: 8081
         parallelism.default: 1
-        env.java.opts.client: -XX:+UseSerialGC -XX:TieredStopAtLevel=1 -Xmx256m
+      FLINK_ENV_JAVA_OPTS_CLI: "-XX:+UseSerialGC -XX:TieredStopAtLevel=1 -Xmx256m"
     volumes:
       - ./examples:/opt/sql-client/examples:ro
     depends_on:

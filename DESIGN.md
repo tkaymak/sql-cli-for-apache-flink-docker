@@ -1,6 +1,6 @@
 # DESIGN: Flink 2.2 + Kafka + faker playground (with Beam on Flink)
 
-Status: APPROVED by owner (Gate A, 2026-10-03) · Owner: tkaymak · Date: 2026-10-03 · Revision 6 (memory-optimised; Confluent Schema Registry per owner decision)
+Status: APPROVED by owner (Gate A, 2026-10-03) · Owner: tkaymak · Date: 2026-10-03 · Revision 7 (Phase-4 verification fixes, see §9; Confluent Schema Registry per owner decision)
 
 This document is the **single source of truth**. Implement exactly what is specified. If something you need is not specified, do **not** guess. Stop and list the open question in your final answer.
 
@@ -86,8 +86,8 @@ Docker Desktop on student laptops often has only 4 GB, so optional parts use **c
   jobmanager.memory.jvm-overhead.min: 64m
   jobmanager.memory.jvm-overhead.max: 64m
   parallelism.default: 1
-  env.java.opts.all: -XX:+UseSerialGC -XX:TieredStopAtLevel=1 -XX:ReservedCodeCacheSize=48m -Xss512k
   ```
+  plus the separate env var `FLINK_ENV_JAVA_OPTS_JM: "-XX:+UseSerialGC -XX:TieredStopAtLevel=1 -XX:ReservedCodeCacheSize=48m -Xss512k"`.
 - `taskmanager` (`command: taskmanager`):
   ```
   jobmanager.rpc.address: jobmanager
@@ -102,8 +102,9 @@ Docker Desktop on student laptops often has only 4 GB, so optional parts use **c
   taskmanager.memory.jvm-overhead.min: 64m
   taskmanager.memory.jvm-overhead.max: 64m
   parallelism.default: 1
-  env.java.opts.all: -XX:+UseSerialGC -XX:TieredStopAtLevel=1 -XX:ReservedCodeCacheSize=48m -Xss512k
   ```
+  plus the separate env var `FLINK_ENV_JAVA_OPTS_TM: "-XX:+UseSerialGC -XX:TieredStopAtLevel=1 -XX:ReservedCodeCacheSize=48m -Xss512k"`.
+- JVM flags are **not** passed via `FLINK_PROPERTIES`: the image entrypoint deletes all whitespace from each `FLINK_PROPERTIES` line (`tr -d '[:space:]'`), so a multi-flag value becomes one invalid flag that `-XX:+IgnoreUnrecognizedVMOptions` silently drops (verified 2026-10-03). `bin/config.sh` reads `FLINK_ENV_JAVA_OPTS_JM/_TM/_CLI` from the environment instead. Do not set `FLINK_ENV_JAVA_OPTS` itself (it would bypass `env.java.default-opts.all`).
 - Why these values (measured, do not "optimise" further): `taskmanager.memory.managed.size` must **not** be 0. With 0, Flink SQL HOP and SESSION window aggregations fail with `NullPointerException: Initial Segment may not be null` (verified). 96m is enough for the course workload. JVM flags: serial GC, C1-only JIT and a capped code cache, because throughput is irrelevant at 5 rows/s.
 - `sql-client` (`command: ["sleep", "infinity"]`):
   ```
@@ -111,8 +112,8 @@ Docker Desktop on student laptops often has only 4 GB, so optional parts use **c
   rest.address: jobmanager
   rest.port: 8081
   parallelism.default: 1
-  env.java.opts.client: -XX:+UseSerialGC -XX:TieredStopAtLevel=1 -Xmx256m
   ```
+  plus the env var `FLINK_ENV_JAVA_OPTS_CLI: "-XX:+UseSerialGC -XX:TieredStopAtLevel=1 -Xmx256m"`.
 - `parallelism.default: 1` makes every SQL job use exactly 1 of the 8 slots, so several examples (and Beam jobs, which use `--parallelism=1`) can run at the same time.
 
 ### 3.3 Kafka (copy of the course's day-2 lab config) and topic creation
@@ -150,8 +151,8 @@ CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk
 - Inside the network, everything uses `kafka:9092`. From the host, `localhost:29092`.
 
 ### 3.4 Other services and dependencies
-- **jobmanager**: `depends_on: kafka-init: condition: service_completed_successfully`.
-- **taskmanager**: `depends_on: jobmanager: condition: service_started`.
+- **jobmanager**: `depends_on: kafka-init: condition: service_completed_successfully`, `restart: unless-stopped`.
+- **taskmanager**: `depends_on: jobmanager: condition: service_started`, `restart: unless-stopped`. Reason (verified): in Flink 2.2.1, cancelling a `SELECT` while its collect sink is still INITIALIZING (e.g. Ctrl+C right after submitting) throws an NPE in `CollectSinkFunction.accumulateFinalResults`, which Flink treats as fatal, and the TaskManager process exits. The restart policy brings it back. Restarting the jobmanager loses all running jobs (no HA); just re-run the examples.
 - **sql-client**:
   - `depends_on: jobmanager: condition: service_started` and `kafka-init: condition: service_completed_successfully`.
   - Volume `./examples:/opt/sql-client/examples:ro`.
@@ -196,11 +197,11 @@ USER flink
 - Verified on 2026-10-03: jars passed to the SQL client with `-l`/`-j` are shipped with each job to the session cluster (Kafka SQL jobs ran on the TaskManager without the jar in `/opt/flink/lib`). Do not copy connector jars into the Flink images.
 - Do **not** override `ENTRYPOINT` and do **not** copy `examples/`; examples arrive only via the bind mount (§3.4).
 
-**`sql-client/bin/sql-client.sh`** (exact content):
+**`sql-client/bin/sql-client.sh`** (exact content; `-l` needs a `file://` URI in Flink 2.2.1, a plain path fails with `URI is not absolute`, verified):
 ```bash
 #!/bin/bash
 # Starts the Flink SQL client against the jobmanager; all connector jars are shipped with each job.
-exec "${FLINK_HOME}/bin/sql-client.sh" embedded -l "${SQL_CLIENT_HOME}/lib" "$@"
+exec "${FLINK_HOME}/bin/sql-client.sh" embedded -l "file://${SQL_CLIENT_HOME}/lib" "$@"
 ```
 
 **`beam/Dockerfile`** (build context `./beam`, used by `beam-client`):
@@ -325,28 +326,34 @@ CREATE TEMPORARY TABLE orders_kafka (
 );
 ```
 
-**`01_faker_basics.sql`**: Block A, then `SELECT * FROM orders_faker LIMIT 10;`. Expected: 10 rows, then the script ends.
+- **Why bounded reads (verified on Flink 2.2.1):** a streaming `SELECT … LIMIT n` on an unbounded source prints n rows but the job (and so the SQL client) never finishes, so `run-example.sh` would hang. The scripts therefore read **bounded** sources: a dynamic table-options hint (`/*+ OPTIONS(...) */`, allowed on a plain table reference) or a `LIKE` copy of the table with a bounded scan option (hints are **not** allowed inside a window TVF's `TABLE ...` argument: parse error). At end of input Flink emits a final watermark, so all windows fire and the job ends. The German comments must explain this and mention that the unbounded variant (e.g. `FROM orders_kafka`) runs forever in the interactive client and is stopped with Ctrl+C.
+
+**`01_faker_basics.sql`**: Block A, then `SELECT * FROM orders_faker /*+ OPTIONS('number-of-rows' = '10') */;`. Expected: 10 rows, `Received a total of 10 rows`, then the script ends (verified, ~3 s).
 
 **`02_faker_to_kafka_json.sql`**: Block A, Block B, then `INSERT INTO orders_kafka SELECT * FROM orders_faker;`. Expected: the script ends after submitting, the job stays RUNNING in the Flink UI, and topic `orders` receives JSON messages.
 
-**`03_windows_tumble_hop_session.sql`** (requires 02 running): `SET 'table.exec.source.idle-timeout' = '5 s';`, Block B, then exactly these three queries:
+**`03_windows_tumble_hop_session.sql`** (requires 02 running for at least ~30 s): `SET 'table.exec.source.idle-timeout' = '5 s';`, Block B, then
+```sql
+CREATE TEMPORARY TABLE orders_snapshot WITH ('scan.bounded.mode' = 'latest-offset') LIKE orders_kafka;
+```
+(a bounded snapshot: reads the topic from the earliest offset up to the offsets at query start), then exactly these three queries:
 ```sql
 SELECT window_start, window_end, product, COUNT(*) AS orders, ROUND(SUM(amount), 2) AS revenue
-FROM TABLE(TUMBLE(TABLE orders_kafka, DESCRIPTOR(order_time), INTERVAL '10' SECOND))
+FROM TABLE(TUMBLE(TABLE orders_snapshot, DESCRIPTOR(order_time), INTERVAL '10' SECOND))
 GROUP BY window_start, window_end, product
 LIMIT 10;
 
 SELECT window_start, window_end, product, COUNT(*) AS orders
-FROM TABLE(HOP(TABLE orders_kafka, DESCRIPTOR(order_time), INTERVAL '5' SECOND, INTERVAL '20' SECOND))
+FROM TABLE(HOP(TABLE orders_snapshot, DESCRIPTOR(order_time), INTERVAL '5' SECOND, INTERVAL '20' SECOND))
 GROUP BY window_start, window_end, product
 LIMIT 10;
 
 SELECT window_start, window_end, customer, COUNT(*) AS orders
-FROM TABLE(SESSION(TABLE orders_kafka PARTITION BY customer, DESCRIPTOR(order_time), INTERVAL '5' SECOND))
+FROM TABLE(SESSION(TABLE orders_snapshot PARTITION BY customer, DESCRIPTOR(order_time), INTERVAL '5' SECOND))
 GROUP BY window_start, window_end, customer
 LIMIT 10;
 ```
-Expected: three result tables printed, one after another. In tableau result mode, a streaming `SELECT ... LIMIT n` stops after n rows and the client continues with the next statement. The reviewer verifies this; do not restructure the queries.
+Expected: three result tables with 10 rows each, then the script ends (verified, ~6 s).
 
 **`04_kafka_to_postgres.sql`** (requires `--profile postgres` and 02 running): Block B, then
 ```sql
@@ -384,9 +391,9 @@ CREATE TEMPORARY TABLE orders_avro (
 
 INSERT INTO orders_avro SELECT order_id, customer, product, amount, order_time FROM orders_faker;
 
-SELECT * FROM orders_avro LIMIT 5;
+SELECT * FROM orders_avro /*+ OPTIONS('scan.bounded.mode' = 'specific-offsets', 'scan.bounded.specific-offsets' = 'partition:0,offset:5') */;
 ```
-Expected: subject `orders_avro-value` exists (`curl -s localhost:8085/subjects`) and 5 rows are printed. The INSERT job keeps running.
+The last query reads exactly the first 5 records of partition 0 (offsets 0–4), waiting until they exist. Expected: subject `orders_avro-value` exists (`curl -s localhost:8085/subjects`), 5 rows are printed and the script ends; the INSERT job keeps running (verified).
 
 **`postgres/init.sql`** (exact):
 ```sql
@@ -460,3 +467,7 @@ beam/data/output/
    - `docker compose exec -d beam-client python kafka_window_count.py` produces messages in `beam_product_counts`.
    - Both jobs are visible in the Flink UI.
 6. `docker compose --profile all down -v` removes everything.
+
+## 9. Phase-4 verification log (elephant, 2026-10-03)
+- Faker 0.6.0 (Flink 2.2.1 build) generates rows on the cluster (acceptance 5 of the faker DESIGN).
+- Fixed in Revision 7: `-l file://` in `sql-client.sh`; JVM flags via `FLINK_ENV_JAVA_OPTS_*`; `restart: unless-stopped` for jobmanager/taskmanager; bounded reads in examples 01/03/05.
