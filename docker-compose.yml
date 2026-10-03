@@ -48,9 +48,7 @@ services:
 
   jobmanager:
     container_name: jobmanager
-    build:
-      context: ./flink
-    image: flink-playground-flink:2.2.1
+    image: flink:2.2.1-scala_2.12-java17
     mem_limit: 768m
     restart: unless-stopped
     ports:
@@ -72,9 +70,7 @@ services:
 
   taskmanager:
     container_name: taskmanager
-    build:
-      context: ./flink
-    image: flink-playground-flink:2.2.1
+    image: flink:2.2.1-scala_2.12-java17
     mem_limit: 1536m
     restart: unless-stopped
     command: taskmanager

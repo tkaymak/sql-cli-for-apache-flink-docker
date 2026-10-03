@@ -18,15 +18,15 @@ def flink_options(streaming: bool, extra_args: list[str] | None = None) -> Pipel
 
 
 def kafka_expansion_service() -> JavaJarExpansionService:
-    # Starts the Java IO expansion service on demand; expanded Kafka transforms run in the
-    # TaskManager as PROCESS environment using the Beam Java SDK "boot" binary.
+    # Starts a slim Java expansion service on demand (only while the pipeline is built).
+    # The expanded Kafka transforms run EMBEDDED inside the Flink TaskManager JVM.
     return JavaJarExpansionService(
-        "/opt/beam/jars/beam-sdks-java-io-expansion-service-2.76.0.jar",
+        "/opt/beam/jars/beam-sdks-java-expansion-service-app-2.76.0.jar",
+        classpath=["/opt/beam/jars/kafka/*.jar"],
         extra_args=[
             "{{PORT}}",
             "--javaClassLookupAllowlistFile=*",
-            "--defaultEnvironmentType=PROCESS",
-            '--defaultEnvironmentConfig={"command": "/opt/apache/beam/boot"}',
+            "--defaultEnvironmentType=EMBEDDED",
             "--experiments=use_deprecated_read",
         ],
     )
