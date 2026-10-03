@@ -45,7 +45,7 @@ Docker Desktop on student laptops often has only 4 GB, so optional parts use **c
 
 | Service (= `container_name`) | Profiles | Image / build | Host port → container | `mem_limit` | Measured RSS (4 SQL jobs running) |
 |---|---|---|---|---|---|
-| `kafka` | (core) | `apache/kafka:4.1.1` | 29092 → 29092 | 512m | ~250 MB |
+| `kafka` | (core) | `apache/kafka:4.1.1` | 29092 → 29092 | 512m | ~170–345 MB |
 | `kafka-init` | (core) | `apache/kafka:4.1.1` | – | 256m | exits after a few seconds |
 | `jobmanager` | (core) | `flink:2.2.1-scala_2.12-java17` (official image, no build) | 8081 → 8081 | 1024m | ~610 MB (~720 MB after Beam jobs: the job-server jar is uploaded as a blob, page cache counts) |
 | `taskmanager` | (core) | `flink:2.2.1-scala_2.12-java17` (official image, no build) | – | 1536m | ~650–740 MB (≈780 MB while a Beam Kafka pipeline runs; KafkaIO runs embedded in the TaskManager JVM) |
