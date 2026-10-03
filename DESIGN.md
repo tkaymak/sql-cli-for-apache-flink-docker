@@ -1,6 +1,6 @@
 # DESIGN: Flink 2.2 + Kafka + faker playground (with Beam on Flink)
 
-Status: APPROVED by owner (Gate A, 2026-10-03) · Owner: tkaymak · Date: 2026-10-03 · Revision 7 (Phase-4 verification fixes, see §9; Confluent Schema Registry per owner decision)
+Status: APPROVED by owner (Gate A, 2026-10-03) · Owner: tkaymak · Date: 2026-10-03 · Revision 8 (Phase-4 verification fixes, see §9; Confluent Schema Registry per owner decision)
 
 This document is the **single source of truth**. Implement exactly what is specified. If something you need is not specified, do **not** guess. Stop and list the open question in your final answer.
 
@@ -32,9 +32,8 @@ This document is the **single source of truth**. Implement exactly what is speci
 | Schema Registry | `confluentinc/cp-schema-registry:8.2.4` (the reference implementation, as discussed on the Day-2 slides; memory-trimmed via heap/JVM flags, §3.4) |
 | Kafka UI | `redpandadata/console:v3.12.0` (Redpanda Console, Go; works with Apache Kafka 4.1 and Confluent-compatible schema registries; measured ~50 MB vs ~400 MB for kafbat/kafka-ui) |
 | PostgreSQL | `postgres:18.6` |
-| Beam Java SDK (source of the Java `boot`) | `apache/beam_java17_sdk:2.76.0` (directory `/opt/apache/beam` contains `boot`, `jars`, `options`, `LICENSE`, `NOTICE`, `third_party_licenses`) |
-| Beam Flink job server jar | `https://repo1.maven.org/maven2/org/apache/beam/beam-runners-flink-2.2-job-server/2.76.0/beam-runners-flink-2.2-job-server-2.76.0.jar` (exists; Beam 2.76.0 supports Flink 2.0/2.1/2.2) |
-| Beam IO expansion service jar | `https://repo1.maven.org/maven2/org/apache/beam/beam-sdks-java-io-expansion-service/2.76.0/beam-sdks-java-io-expansion-service-2.76.0.jar` |
+| Beam Flink job server jar | `https://repo1.maven.org/maven2/org/apache/beam/beam-runners-flink-2.2-job-server/2.76.0/beam-runners-flink-2.2-job-server-2.76.0.jar` (exists; Beam 2.76.0 supports Flink 2.0/2.1/2.2; it also contains KafkaIO, kafka-clients and the embedded Java SDK harness, verified) |
+| Beam expansion service (slim) | `https://repo1.maven.org/maven2/org/apache/beam/beam-sdks-java-expansion-service-app/2.76.0/beam-sdks-java-expansion-service-app-2.76.0.jar` (62 MB) plus the KafkaIO classpath jars in §3.5. Do **not** use `beam-sdks-java-io-expansion-service` (832 MB in 2.76.0; streaming it as a staged artifact over gRPC fails with `OutOfMemoryError: Cannot reserve … direct buffer memory`, verified) |
 | Beam Python package | `apache-beam==2.76.0` on `python:3.12-slim-bookworm`, plus `openjdk-17-jre-headless` (the Python SDK runs in LOOPBACK mode inside `beam-client`; no separate worker-pool image) |
 
 Elasticsearch is **removed** (there is no Flink 2.x connector).
@@ -48,13 +47,13 @@ Docker Desktop on student laptops often has only 4 GB, so optional parts use **c
 |---|---|---|---|---|---|
 | `kafka` | (core) | `apache/kafka:4.1.1` | 29092 → 29092 | 512m | ~250 MB |
 | `kafka-init` | (core) | `apache/kafka:4.1.1` | – | 256m | exits after a few seconds |
-| `jobmanager` | (core) | build: context `./flink`, `image: flink-playground-flink:2.2.1` | 8081 → 8081 | 768m | ~640 MB |
-| `taskmanager` | (core) | build: context `./flink`, `image: flink-playground-flink:2.2.1` | – | 1536m | ~715 MB (+~300 MB while a Beam Kafka pipeline runs: Beam's Java SDK harness is a second JVM inside this container) |
+| `jobmanager` | (core) | `flink:2.2.1-scala_2.12-java17` (official image, no build) | 8081 → 8081 | 768m | ~430–480 MB |
+| `taskmanager` | (core) | `flink:2.2.1-scala_2.12-java17` (official image, no build) | – | 1536m | ~520–690 MB (≈750 MB while a Beam Kafka pipeline runs; KafkaIO runs embedded in the TaskManager JVM) |
 | `sql-client` | (core) | build: context `./sql-client`, `args: FAKER_JAR_URL: ${FAKER_JAR_URL:-https://github.com/tkaymak/flink-faker/releases/download/v0.6.0/flink-faker-0.6.0.jar}`, `image: flink-playground-sql-client:2.2.1` | – | 512m | ~6 MB idle (JVM only while a client session runs) |
 | `console` | `ui`, `all` | `redpandadata/console:v3.12.0` | 8080 → 8080 | 128m | ~50 MB |
 | `schema-registry` | `avro`, `all` | `confluentinc/cp-schema-registry:8.2.4` | 8085 → 8085 | 512m | ~300 MB (estimate with 256 MB heap; the elephant measures it) |
 | `postgres` | `postgres`, `all` | `postgres:18.6` | **5433** → 5432 | 256m | ~40 MB |
-| `beam-client` | `beam`, `all` | build: context `./beam`, `image: flink-playground-beam:2.76.0` | – | 1536m | idle ~50 MB; while a pipeline is submitted/running ~0.6–1 GB (Python + Beam job-server JVM + short-lived expansion-service JVM) |
+| `beam-client` | `beam`, `all` | build: context `./beam`, `image: flink-playground-beam:2.76.0` | – | 1536m | idle ~20–40 MB; ~750 MB while a pipeline runs (Python + Beam job-server JVM; the expansion-service JVM only lives during pipeline construction) |
 
 - **Memory (measured on Docker Desktop, arm64, 2026-10-03):** core with 4 concurrent streaming SQL jobs ≈ **1.6 GB** (before tuning: ≈ 2.0 GB). Modules are switched on only when needed:
   - `ui` +50 MB
@@ -69,7 +68,7 @@ Docker Desktop on student laptops often has only 4 GB, so optional parts use **c
   # Kopieren nach .env und anpassen, z.B.: COMPOSE_PROFILES=ui
   COMPOSE_PROFILES=
   ```
-- `jobmanager` and `taskmanager` use the **same** build (`./flink`), and you must give that image the name `flink-playground-flink:2.2.1` via `image:` on both services so it is built only once.
+- `jobmanager` and `taskmanager` use the official image `flink:2.2.1-scala_2.12-java17` directly (`image:`, no `build:`). There is no `flink/` directory.
 - Do **not** use the obsolete top-level `version:` key. Do not set `platform:`.
 - All services except `beam-client` share the default compose network (service names are DNS names). `beam-client` joins the TaskManager's network namespace (§3.6) and can still resolve all service names.
 - Postgres uses host port 5433 to avoid a clash with Airflow's Postgres from course day 1.
@@ -177,17 +176,8 @@ CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk
 - **beam-client**: see §3.6 (`network_mode: "service:taskmanager"`, `depends_on: taskmanager: condition: service_started`, volume `./beam/data:/data`, `command: ["sleep", "infinity"]`).
 
 ### 3.5 Images to build
-**`flink/Dockerfile`** (exact content):
-```dockerfile
-FROM flink:2.2.1-scala_2.12-java17
-USER root
-# Beam Java SDK harness ("boot" + jars) at its original path, so that Beam's cross-language
-# Java transforms (KafkaIO) can run inside the TaskManager with environment type PROCESS.
-COPY --from=apache/beam_java17_sdk:2.76.0 /opt/apache/beam /opt/apache/beam
-RUN chmod -R a+rX /opt/apache/beam && chmod a+rx /opt/apache/beam/boot
-USER flink
-```
-- Note (G2 finding, accepted by the elephant): the base image's default user is `flink` (uid 9999), so both Dockerfiles switch to `USER root` for the build steps and back to `USER flink` at the end. The `sql-client` Dockerfile also `chown`s `/opt/sql-client` to `flink:flink`.
+- Note (G2 finding, accepted by the elephant): the base image's default user is `flink` (uid 9999), so `sql-client/Dockerfile` switches to `USER root` for the build steps and back to `USER flink` at the end, and `chown`s `/opt/sql-client` to `flink:flink`.
+- `flink/Dockerfile` (Revision ≤7) is **deleted** in Revision 8: Beam's Java `boot` binary is no longer needed (§3.6, EMBEDDED environment).
 
 **`sql-client/Dockerfile`** (build context `./sql-client`):
 - `FROM flink:2.2.1-scala_2.12-java17`, then `ARG FAKER_JAR_URL=<default from §2>`.
@@ -208,7 +198,15 @@ exec "${FLINK_HOME}/bin/sql-client.sh" embedded -l "file://${SQL_CLIENT_HOME}/li
 - `FROM python:3.12-slim-bookworm` (G5 finding, accepted: the floating `python:3.12-slim` tag is Debian 13 "trixie", which has no `openjdk-17-jre-headless`; bookworm has it).
 - `RUN apt-get update && apt-get install -y --no-install-recommends openjdk-17-jre-headless wget ca-certificates && rm -rf /var/lib/apt/lists/*`.
 - `RUN pip install --no-cache-dir apache-beam==2.76.0`.
-- `RUN set -eux; mkdir -p /opt/beam/jars; cd /opt/beam/jars; wget -q <job-server jar URL from §2>; wget -q <expansion jar URL from §2>`. Keep the original Maven file names (`beam-runners-flink-2.2-job-server-2.76.0.jar`, `beam-sdks-java-io-expansion-service-2.76.0.jar`); §3.6 relies on them.
+- `RUN set -eux; mkdir -p /opt/beam/jars/kafka; cd /opt/beam/jars; wget -q <job-server jar URL from §2>; wget -q <expansion-service-app jar URL from §2>; cd kafka; wget -q <each URL below>`. Keep the original Maven file names; §3.6 relies on them. The KafkaIO classpath jars (into `/opt/beam/jars/kafka/`, 21 MB total, verified):
+  - `https://repo1.maven.org/maven2/org/apache/beam/beam-sdks-java-io-kafka/2.76.0/beam-sdks-java-io-kafka-2.76.0.jar`
+  - `https://repo1.maven.org/maven2/org/apache/beam/beam-sdks-java-extensions-avro/2.76.0/beam-sdks-java-extensions-avro-2.76.0.jar`
+  - `https://repo1.maven.org/maven2/org/apache/beam/beam-sdks-java-extensions-protobuf/2.76.0/beam-sdks-java-extensions-protobuf-2.76.0.jar`
+  - `https://repo1.maven.org/maven2/org/apache/kafka/kafka-clients/3.9.2/kafka-clients-3.9.2.jar`
+  - `https://repo1.maven.org/maven2/com/github/luben/zstd-jni/1.5.6-4/zstd-jni-1.5.6-4.jar`
+  - `https://repo1.maven.org/maven2/at/yawk/lz4/lz4-java/1.10.1/lz4-java-1.10.1.jar`
+  - `https://repo1.maven.org/maven2/org/xerial/snappy/snappy-java/1.1.10.5/snappy-java-1.1.10.5.jar`
+  - `https://repo1.maven.org/maven2/com/google/protobuf/protobuf-java/4.33.2/protobuf-java-4.33.2.jar`
 - `COPY pipelines/ /opt/beam/pipelines/`, `WORKDIR /opt/beam/pipelines`, `CMD ["sleep", "infinity"]`.
 
 **Files to delete (G2):**
@@ -224,11 +222,12 @@ Do **not** touch the empty directory `flink-sql-cli-docker`; it is a git submodu
 - There is no permanent worker-pool or expansion-service container. Everything Beam needs runs inside **`beam-client`**, and only while a pipeline runs:
   - The pipeline's Python process doubles as the **Python SDK worker** (`--environment_type=LOOPBACK`).
   - The Python FlinkRunner starts the **Flink job-server JVM** from the jar (`--flink_job_server_jar`).
-  - `ReadFromKafka`/`WriteToKafka` start a **short-lived Java expansion-service JVM** from the IO expansion jar (`JavaJarExpansionService`) during pipeline construction.
+  - `ReadFromKafka`/`WriteToKafka` start a **short-lived Java expansion-service JVM** from the slim expansion-service app plus the KafkaIO classpath jars (`JavaJarExpansionService(..., classpath=[...])`) during pipeline construction.
 - LOOPBACK means the TaskManager connects back to the worker at `localhost:<port>`. Therefore `beam-client` uses **`network_mode: "service:taskmanager"`**, sharing the TaskManager's network stack.
   - Consequences: no `ports:` and no `hostname:` on `beam-client`. It still resolves `jobmanager` and `kafka`. If the TaskManager is restarted, restart `beam-client` too (document this in the README troubleshooting).
-- **Java cross-language transforms** (KafkaIO) run inside the TaskManager via environment type `PROCESS` using `/opt/apache/beam/boot` (provided by `flink/Dockerfile`).
-- File IO (`ReadFromText`/`WriteToText`) runs in the LOOPBACK worker, i.e. in `beam-client`, which has `./beam/data` mounted at `/data`. `WriteToText` creates missing parent directories itself, so do not create `beam/data/output/`.
+- **Java cross-language transforms** (KafkaIO) run with environment type **`EMBEDDED`**, i.e. inside the TaskManager JVM, using the classes of the Flink job-server jar (which Flink ships as the job jar). Verified 2026-10-03: no Java `boot` binary, no artifact retrieval and no second JVM are needed. (`PROCESS` failed: the job server's artifact files live in `beam-client`'s filesystem, and streaming them to the TaskManager overflows its 96 MB direct-memory limit.)
+- File IO runs in the LOOPBACK worker, i.e. in `beam-client`, which has `./beam/data` mounted at `/data`.
+- Known Beam 2.76.0 bug with the Flink 2.x runner (verified): `WriteToText` in a batch pipeline fails in its finalize step with `IllegalStateException: TimestampCombiner moved element from … (TIMESTAMP_MAX_VALUE) to earlier time … (end of global window)`. `wordcount.py` therefore does **not** use `WriteToText` (see below).
 - **`beam/pipelines/common.py`** defines:
   ```python
   BASE_ARGS = [
@@ -244,15 +243,15 @@ Do **not** touch the empty directory `flink-sql-cli-docker`; it is a git submodu
       return PipelineOptions(BASE_ARGS + (["--streaming"] if streaming else []) + (extra_args or []))
 
   def kafka_expansion_service() -> JavaJarExpansionService:
-      # Starts the Java IO expansion service on demand; expanded Kafka transforms run in the
-      # TaskManager as PROCESS environment using the Beam Java SDK "boot" binary.
+      # Starts a slim Java expansion service on demand (only while the pipeline is built).
+      # The expanded Kafka transforms run EMBEDDED inside the Flink TaskManager JVM.
       return JavaJarExpansionService(
-          "/opt/beam/jars/beam-sdks-java-io-expansion-service-2.76.0.jar",
+          "/opt/beam/jars/beam-sdks-java-expansion-service-app-2.76.0.jar",
+          classpath=["/opt/beam/jars/kafka/*.jar"],
           extra_args=[
               "{{PORT}}",
               "--javaClassLookupAllowlistFile=*",
-              "--defaultEnvironmentType=PROCESS",
-              '--defaultEnvironmentConfig={"command": "/opt/apache/beam/boot"}',
+              "--defaultEnvironmentType=EMBEDDED",
               "--experiments=use_deprecated_read",
           ],
       )
@@ -261,17 +260,17 @@ Do **not** touch the empty directory `flink-sql-cli-docker`; it is a git submodu
 - **Code structure of both pipeline scripts:**
   - Standard imports (`import json`, `import re`, `import typing`, `import apache_beam as beam`, `from apache_beam.transforms import window`, `from apache_beam.io.kafka import ReadFromKafka, WriteToKafka`, `from common import flink_options, kafka_expansion_service`, …).
   - A `run()` function containing `with beam.Pipeline(options=...) as p:` and `if __name__ == "__main__": run()`. The context manager blocks until the job ends. For the streaming script that is "forever", and the LOOPBACK worker lives in this process, so it must keep running (started with `docker compose exec -d`).
-  - The DoFn for formatting implements `process(self, element, window=beam.DoFn.WindowParam)`.
+  - The formatting DoFn in `kafka_window_count.py` implements `process(self, element, window=beam.DoFn.WindowParam)`.
   - Keep the regex `[A-Za-z']+` exactly (the input has no umlauts).
 - **`beam/pipelines/wordcount.py`** (batch, `flink_options(streaming=False)`):
   - Reads `/data/input.txt`, splits into words (regex `[A-Za-z']+`), lower-cases them and counts.
-  - Writes `/data/output/wordcount` via `WriteToText(..., num_shards=1)` with lines formatted as `f"{word}: {count}"`.
+  - Formats each result as `f"{word}: {count}"`, then `beam.combiners.ToList()` and a `beam.Map(write_lines)` where the plain Python function `write_lines(lines)` creates `/data/output` (`os.makedirs(..., exist_ok=True)`), writes the **sorted** lines to `/data/output/wordcount.txt` (one per line, trailing newline) and returns `len(lines)`; finally `beam.Map(print)` (prints the number of distinct words). A German comment explains that this replaces `WriteToText` because of the Beam/Flink-2 bug above. Do not define a formatting DoFn in this script (a `beam.MapTuple` is enough).
   - `beam/data/input.txt` contains exactly these 2 lines, repeated 3 times (6 lines total):
     ```
     Ein Stream ist eine Tabelle in Bewegung
     Batch ist nur ein spezieller Fall von Streaming
     ```
-  - Expected: `beam/data/output/wordcount-00000-of-00001` contains the line `ist: 6`.
+  - Expected: `beam/data/output/wordcount.txt` contains 13 lines, including `ist: 6` (verified, ~25 s).
 - **`beam/pipelines/kafka_window_count.py`** (streaming, `flink_options(streaming=True, extra_args=["--experiments=use_deprecated_read"])`):
   - `ReadFromKafka(consumer_config={"bootstrap.servers": "kafka:9092", "auto.offset.reset": "earliest", "group.id": "beam-window-count"}, topics=["orders"], expansion_service=kafka_expansion_service())`.
     - Element timestamps are those assigned by KafkaIO (**processing time**). Do not re-assign event timestamps; document this in a German comment as a simplification.
@@ -279,8 +278,8 @@ Do **not** touch the empty directory `flink-sql-cli-docker`; it is a git submodu
   - Then a `DoFn` with `window=beam.DoFn.WindowParam` that emits `(product.encode(), json.dumps({"product": product, "count": count, "window_end": window.end.to_utc_datetime().isoformat()}).encode())`, then `.with_output_types(typing.Tuple[bytes, bytes])`.
   - Then `WriteToKafka(producer_config={"bootstrap.servers": "kafka:9092"}, topic="beam_product_counts", expansion_service=kafka_expansion_service())`.
   - Precondition: SQL example 02 (§4) is running, so `orders` gets data.
-  - Expected: messages in topic `beam_product_counts` within ~2 minutes.
-- **Fallback (only if the elephant's verification shows LOOPBACK does not work):** a Python worker-pool sidecar (`apache/beam_python3.12_sdk:2.76.0`, `--worker_pool`, `network_mode: service:taskmanager`, `--environment_type=EXTERNAL --environment_config=localhost:50000`). Implementers do **not** build this unless a task card says so.
+  - Expected: messages in topic `beam_product_counts` within ~2 minutes (verified: first window contains the backlog, then ~60 per product per minute).
+- LOOPBACK was verified to work (no worker-pool fallback needed).
 
 ## 4. Flink SQL examples (`examples/`) and helpers
 - Every `.sql` file (01–05 without exception) begins with the two `SET` lines below. Statements described per example come after them.
@@ -441,7 +440,7 @@ beam/data/output/
 - Remove the old reference to `img/flink-web-ui.png` (it shows Flink 1.x) and delete the `img/` folder.
 
 ## 6. Work packages (the elephant hands out one task card per package)
-- **G2** – `flink/Dockerfile`, `sql-client/Dockerfile`, `sql-client/bin/sql-client.sh`, and the deletions in §3.5.
+- **G2** – (`flink/Dockerfile`, removed in Rev. 8), `sql-client/Dockerfile`, `sql-client/bin/sql-client.sh`, and the deletions in §3.5.
 - **G3** – `docker-compose.yml` (§3.1–3.4, §3.6), `postgres/init.sql`, `.gitignore` (§4), `.env.example` (§3.1).
 - **G4** – `examples/01…05` and `run-example.sh` (§4).
 - **G5** – `beam/Dockerfile`, `beam/pipelines/common.py`, `wordcount.py`, `kafka_window_count.py`, `beam/data/input.txt` (§3.5, §3.6, lean LOOPBACK setup).
@@ -463,7 +462,7 @@ beam/data/output/
 3. Examples 01–05 behave as described in §4 (with their stated preconditions/profiles).
 4. `--profile ui`: Redpanda Console at http://localhost:8080 lists the topics `orders`, `orders_avro` and `beam_product_counts` (pre-created by kafka-init). With `avro` also active, it shows the subject `orders_avro-value`. With only `--profile ui`, the console container stays running.
 5. `--profile beam`:
-   - `docker compose exec beam-client python wordcount.py` finishes, and `beam/data/output/wordcount-00000-of-00001` contains `ist: 6`. `docker stats` shows beam-client's peak RSS.
+   - `docker compose exec beam-client python wordcount.py` finishes, and `beam/data/output/wordcount.txt` contains `ist: 6`. `docker stats` shows beam-client's peak RSS.
    - `docker compose exec -d beam-client python kafka_window_count.py` produces messages in `beam_product_counts`.
    - Both jobs are visible in the Flink UI.
 6. `docker compose --profile all down -v` removes everything.
@@ -471,3 +470,4 @@ beam/data/output/
 ## 9. Phase-4 verification log (elephant, 2026-10-03)
 - Faker 0.6.0 (Flink 2.2.1 build) generates rows on the cluster (acceptance 5 of the faker DESIGN).
 - Fixed in Revision 7: `-l file://` in `sql-client.sh`; JVM flags via `FLINK_ENV_JAVA_OPTS_*`; `restart: unless-stopped` for jobmanager/taskmanager; bounded reads in examples 01/03/05.
+- Fixed in Revision 8: Beam KafkaIO via EMBEDDED environment + slim expansion service (832 MB jar dropped), `flink/` image removed, wordcount without `WriteToText`.
