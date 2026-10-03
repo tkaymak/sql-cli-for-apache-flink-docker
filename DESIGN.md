@@ -179,11 +179,14 @@ CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk
 **`flink/Dockerfile`** (exact content):
 ```dockerfile
 FROM flink:2.2.1-scala_2.12-java17
+USER root
 # Beam Java SDK harness ("boot" + jars) at its original path, so that Beam's cross-language
 # Java transforms (KafkaIO) can run inside the TaskManager with environment type PROCESS.
 COPY --from=apache/beam_java17_sdk:2.76.0 /opt/apache/beam /opt/apache/beam
 RUN chmod -R a+rX /opt/apache/beam && chmod a+rx /opt/apache/beam/boot
+USER flink
 ```
+- Note (G2 finding, accepted by the elephant): the base image's default user is `flink` (uid 9999), so both Dockerfiles switch to `USER root` for the build steps and back to `USER flink` at the end. The `sql-client` Dockerfile also `chown`s `/opt/sql-client` to `flink:flink`.
 
 **`sql-client/Dockerfile`** (build context `./sql-client`):
 - `FROM flink:2.2.1-scala_2.12-java17`, then `ARG FAKER_JAR_URL=<default from §2>`.
