@@ -1,1 +1,2 @@
-settings/certs
+.DS_Store
+beam/data/output/
