@@ -259,6 +259,25 @@ Instead of running separate worker-pool or persistent expansion-service containe
      ```
      *(Or view messages in **Redpanda Console** at [http://localhost:8080](http://localhost:8080) if `--profile ui` is running.)*
 
+4. **Triggers & Accumulation (Kurstag 3):**
+   *Precondition:* Ensure SQL example 02 is running so that the `orders` topic receives data.
+   
+   Launch the trigger-based streaming pipeline in the background using `-d` (the Python process must stay alive as the LOOPBACK worker):
+   ```bash
+   docker compose exec -d beam-client python kafka_window_triggers.py
+   ```
+   *(Or run with discarding mode: `docker compose exec -d beam-client python kafka_window_triggers.py --mode discarding`.)*
+   - Consumes new JSON order events from Kafka `orders` topic using KafkaIO (`auto.offset.reset: latest`).
+   - Assigns event-time timestamps from `order_time` and computes 120-second fixed window counts per product.
+   - Evaluates composite triggers (`AfterWatermark` with early firing after 60 s processing time, on-time firing at watermark, and late firings per element up to 300 s allowed lateness).
+   - In `accumulating` mode, counts of later panes include earlier ones for the same window; in `discarding` mode, they do not. Panes are classified as `EARLY` (speculative), `ON_TIME` (at watermark), or `LATE` (handling out-of-order data).
+   - Writes result JSON tuples back to Kafka topic `beam_window_triggers`.
+   - Verify messages in `beam_window_triggers` using the Kafka console consumer:
+     ```bash
+     docker compose exec kafka /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server localhost:9092 --topic beam_window_triggers --from-beginning
+     ```
+     *(Or view messages in **Redpanda Console** at [http://localhost:8080](http://localhost:8080) if `--profile ui` is running.)*
+
 ---
 
 ## 7. Troubleshooting
@@ -269,6 +288,10 @@ In Flink 2.2.1, cancelling a `SELECT` query right after submitting while its col
 ```bash
 docker compose up -d --force-recreate beam-client
 ```
+
+### Several Beam Pipelines at Once
+
+Each running Beam streaming pipeline needs about 0.4 GB in `beam-client` (Python worker + job server) and about 55 MB JVM metaspace in the TaskManager (configured for up to ~4 Beam jobs). On an 8 GB laptop run at most two Beam streaming pipelines at the same time; stop the others with `docker compose restart beam-client` or cancel them in the Flink UI.
 
 ### JobManager Restarts & Lost Jobs (No HA)
 
@@ -405,6 +428,18 @@ Kompakte Schritt-für-Schritt-Anleitung für die Übungen im CAS Data Engineerin
      ```bash
      docker compose exec kafka /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server localhost:9092 --topic beam_product_counts --from-beginning
      ```
+   - **Triggers & Akkumulation (Kurstag 3):**
+     Streaming-Pipeline mit Triggern im Hintergrund (`-d`) ausführen (Beispiel 02 muss laufen):
+     ```bash
+     docker compose exec -d beam-client python kafka_window_triggers.py
+     ```
+     *(Oder im Discarding-Modus: `docker compose exec -d beam-client python kafka_window_triggers.py --mode discarding`.)*
+     
+     Ausgabe im Kafka-Topic `beam_window_triggers` prüfen:
+     ```bash
+     docker compose exec kafka /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server localhost:9092 --topic beam_window_triggers --from-beginning
+     ```
+     Frühe (`EARLY`), pünktliche (`ON_TIME`) und verspätete (`LATE`) Panes feuern separat anhand von Event-Time-Wasserzeichen und Verarbeitungszeit. Im Modus `accumulating` summieren Folge-Panes frühere Werte auf, während `discarding` nur die jeweils neu hinzugekommenen Elemente ausgibt.
 
 8. **Umgebung vollständig stoppen und aufräumen:**
    ```bash

@@ -92,20 +92,20 @@ Docker Desktop on student laptops often has only 4 GB, so optional parts use **c
   ```
   jobmanager.rpc.address: jobmanager
   taskmanager.numberOfTaskSlots: 8
-  taskmanager.memory.process.size: 896m
+  taskmanager.memory.process.size: 1056m
   taskmanager.memory.managed.size: 96m
   taskmanager.memory.framework.heap.size: 64m
   taskmanager.memory.framework.off-heap.size: 32m
   taskmanager.memory.network.min: 48m
   taskmanager.memory.network.max: 64m
-  taskmanager.memory.jvm-metaspace.size: 160m
+  taskmanager.memory.jvm-metaspace.size: 320m
   taskmanager.memory.jvm-overhead.min: 64m
   taskmanager.memory.jvm-overhead.max: 64m
   parallelism.default: 1
   ```
   plus the separate env var `FLINK_ENV_JAVA_OPTS_TM: "-XX:+UseSerialGC -XX:TieredStopAtLevel=1 -XX:ReservedCodeCacheSize=48m -Xss512k"`.
 - JVM flags are **not** passed via `FLINK_PROPERTIES`: the image entrypoint deletes all whitespace from each `FLINK_PROPERTIES` line (`tr -d '[:space:]'`), so a multi-flag value becomes one invalid flag that `-XX:+IgnoreUnrecognizedVMOptions` silently drops (verified 2026-10-03). `bin/config.sh` reads `FLINK_ENV_JAVA_OPTS_JM/_TM/_CLI` from the environment instead. Do not set `FLINK_ENV_JAVA_OPTS` itself (it would bypass `env.java.default-opts.all`).
-- Why these values (measured, do not "optimise" further): `taskmanager.memory.managed.size` must **not** be 0. With 0, Flink SQL HOP and SESSION window aggregations fail with `NullPointerException: Initial Segment may not be null` (verified). 96m is enough for the course workload. JVM flags: serial GC, C1-only JIT and a capped code cache, because throughput is irrelevant at 5 rows/s.
+- Why these values (measured, do not "optimise" further): `taskmanager.memory.managed.size` must **not** be 0. With 0, Flink SQL HOP and SESSION window aggregations fail with `NullPointerException: Initial Segment may not be null` (verified). 96m is enough for the course workload. `taskmanager.memory.jvm-metaspace.size` is **320m** (Rev. 10; process size raised by the same 160m so the heap is unchanged): every Beam job loads the Flink job-server classes into its own classloader (~55 MB metaspace each); with 160m a second concurrent Beam job crashed the TaskManager with `OutOfMemoryError: Metaspace` (verified). Metaspace is only committed when used, so idle RSS is unchanged. JVM flags: serial GC, C1-only JIT and a capped code cache, because throughput is irrelevant at 5 rows/s.
 - `sql-client` (`command: ["sleep", "infinity"]`):
   ```
   jobmanager.rpc.address: jobmanager
@@ -498,3 +498,4 @@ beam/data/output/
 - Fixed in Revision 7: `-l file://` in `sql-client.sh`; JVM flags via `FLINK_ENV_JAVA_OPTS_*`; `restart: unless-stopped` for jobmanager/taskmanager; bounded reads in examples 01/03/05.
 - Fixed in Revision 8: Beam KafkaIO via EMBEDDED environment + slim expansion service (832 MB jar dropped), `flink/` image removed, wordcount without `WriteToText`.
 - Revision 9 (2026-10-04): Kafka 4.1.1 → 4.3.1 (Share Groups GA since 4.2). Full clean run passed: examples 01–05, console, Schema Registry, Postgres, Beam wordcount and Beam KafkaIO pipeline (Beam bundles kafka-clients 3.9.2, compatible with 4.x brokers). Memory: core with 02+03 ≈ 1.63 GB (kafka 249 MB), everything incl. Beam ≈ 2.75 GB (≤ Rev. 8).
+- Revision 10 (2026-10-04): Beam trigger example (§3.7) verified: EARLY/ON_TIME/LATE panes, accumulating vs. discarding differ as on the day-3 slides. TaskManager metaspace 160m → 320m after a reproduced metaspace OOM with two Beam jobs. Clean run with all SQL examples + wordcount + three concurrent Beam streaming jobs: no TaskManager restart; memory with everything ≈ 3.1 GB (beam-client ≈ 1.25 GB with three pipelines, ≈ 0.4 GB per streaming pipeline).

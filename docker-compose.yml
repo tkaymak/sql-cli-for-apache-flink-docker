@@ -44,7 +44,7 @@ services:
         condition: service_healthy
     entrypoint: ["/bin/bash", "-c"]
     command:
-      - 'for t in orders orders_avro beam_product_counts; do /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --topic "$$t" --partitions 1 --replication-factor 1; done'
+      - 'for t in orders orders_avro beam_product_counts beam_window_triggers; do /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --topic "$$t" --partitions 1 --replication-factor 1; done'
 
   jobmanager:
     container_name: jobmanager
@@ -78,13 +78,13 @@ services:
       FLINK_PROPERTIES: |
         jobmanager.rpc.address: jobmanager
         taskmanager.numberOfTaskSlots: 8
-        taskmanager.memory.process.size: 896m
+        taskmanager.memory.process.size: 1056m
         taskmanager.memory.managed.size: 96m
         taskmanager.memory.framework.heap.size: 64m
         taskmanager.memory.framework.off-heap.size: 32m
         taskmanager.memory.network.min: 48m
         taskmanager.memory.network.max: 64m
-        taskmanager.memory.jvm-metaspace.size: 160m
+        taskmanager.memory.jvm-metaspace.size: 320m
         taskmanager.memory.jvm-overhead.min: 64m
         taskmanager.memory.jvm-overhead.max: 64m
         parallelism.default: 1
