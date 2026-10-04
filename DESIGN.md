@@ -1,6 +1,6 @@
 # DESIGN: Flink 2.2 + Kafka + faker playground (with Beam on Flink)
 
-Status: APPROVED by owner (Gate A, 2026-10-03) · Owner: tkaymak · Date: 2026-10-03 · Revision 9 (Kafka 4.3.1; Phase-4 verification fixes, see §9; Confluent Schema Registry per owner decision)
+Status: APPROVED by owner (Gate A, 2026-10-03) · Owner: tkaymak · Date: 2026-10-03 · Revision 10 (Beam trigger example; Kafka 4.3.1; Phase-4 verification fixes, see §9; Confluent Schema Registry per owner decision)
 
 This document is the **single source of truth**. Implement exactly what is specified. If something you need is not specified, do **not** guess. Stop and list the open question in your final answer.
 
@@ -146,7 +146,7 @@ CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk
   - `depends_on: kafka: condition: service_healthy` and `restart: "no"`.
   - `entrypoint: ["/bin/bash", "-c"]`, with this command (one string):
     ```
-    for t in orders orders_avro beam_product_counts; do /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --topic "$t" --partitions 1 --replication-factor 1; done
+    for t in orders orders_avro beam_product_counts beam_window_triggers; do /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --topic "$t" --partitions 1 --replication-factor 1; done
     ```
 - Inside the network, everything uses `kafka:9092`. From the host, `localhost:29092`.
 
@@ -281,6 +281,31 @@ Do **not** touch the empty directory `flink-sql-cli-docker`; it is a git submodu
   - Precondition: SQL example 02 (§4) is running, so `orders` gets data.
   - Expected: messages in topic `beam_product_counts` within ~2 minutes (verified: first window contains the backlog, then ~60 per product per minute).
 - LOOPBACK was verified to work (no worker-pool fallback needed).
+
+### 3.7 Beam trigger example (Revision 10, course day 3 "Was/Wo/Wann/Wie")
+Mirrors the day-3 slides (ReadFromKafka → FixedWindows(120) → AfterWatermark with early/late firings → accumulation mode). New file **`beam/pipelines/kafka_window_triggers.py`** (same code structure and imports style as `kafka_window_count.py`; reuse `flink_options` and `kafka_expansion_service` from `common.py` unchanged):
+- CLI: `argparse` with `--mode {accumulating,discarding}` (default `accumulating`); unknown args are passed on to `flink_options(streaming=True, extra_args=["--experiments=use_deprecated_read"] + remaining_args)`.
+- Read: `ReadFromKafka(consumer_config={"bootstrap.servers": "kafka:9092", "auto.offset.reset": "latest", "group.id": f"beam-window-triggers-{mode}"}, topics=["orders"], expansion_service=kafka_expansion_service())`. (`latest`: only new orders, so early/on-time/late firings are observable live; German comment explains it.)
+- Event time: `beam.Map(to_timestamped)` where `to_timestamped(kv)` parses `json.loads(kv[1])`, converts `order_time` (format `YYYY-MM-DD HH:MM:SS.fff`, UTC) to epoch seconds and returns `beam.window.TimestampedValue(order["product"], ts)`. German comment: order_time liegt 0–5 s in der Vergangenheit, daher entstehen echte verspätete Elemente (late data).
+- Window/trigger (exactly):
+  ```python
+  beam.WindowInto(
+      window.FixedWindows(120),
+      trigger=trigger.AfterWatermark(
+          early=trigger.AfterProcessingTime(60),
+          late=trigger.AfterCount(1)),
+      accumulation_mode=(trigger.AccumulationMode.ACCUMULATING if mode == "accumulating"
+                         else trigger.AccumulationMode.DISCARDING),
+      allowed_lateness=300)
+  ```
+  (`from apache_beam.transforms import trigger, window`.)
+- Then `beam.Map(lambda p: (p, 1))` → `beam.CombinePerKey(sum)`.
+- Format DoFn with `window=beam.DoFn.WindowParam, pane=beam.DoFn.PaneInfoParam` emitting key `product.encode()` and value JSON `{"product", "count", "window_start", "window_end", "timing": pane.timing name ("EARLY"/"ON_TIME"/"LATE"/"UNKNOWN"), "pane_index": pane.index, "mode": mode}` (`window_*` as UTC ISO strings), `.with_output_types(typing.Tuple[bytes, bytes])`.
+- Write: `WriteToKafka(producer_config={"bootstrap.servers": "kafka:9092"}, topic="beam_window_triggers", expansion_service=kafka_expansion_service())`.
+- `kafka-init` creates the additional topic `beam_window_triggers` (append it to the `for t in …` list in `docker-compose.yml`; update §3.3 accordingly).
+- Precondition: SQL example 02 running. Start with `docker compose exec -d beam-client python kafka_window_triggers.py` (or `--mode discarding`).
+- Expected (elephant verifies): within ~4 min the topic `beam_window_triggers` contains EARLY panes (every ~60 s per window), one ON_TIME pane per window/product, and LATE panes; with `accumulating` the counts of later panes include earlier ones, with `discarding` they do not.
+- README: add step "4. Triggers & Accumulation (Kurstag 3)" to the Beam section (English) and one bullet to the German Kurs-Quickstart, including the consumer command for `beam_window_triggers` and a 2-sentence explanation of EARLY/ON_TIME/LATE and accumulating vs. discarding.
 
 ## 4. Flink SQL examples (`examples/`) and helpers
 - Every `.sql` file (01–05 without exception) begins with the two `SET` lines below. Statements described per example come after them.
