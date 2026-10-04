@@ -1,6 +1,6 @@
 # DESIGN: Flink 2.2 + Kafka + faker playground (with Beam on Flink)
 
-Status: APPROVED by owner (Gate A, 2026-10-03) · Owner: tkaymak · Date: 2026-10-03 · Revision 8 (Phase-4 verification fixes, see §9; Confluent Schema Registry per owner decision)
+Status: APPROVED by owner (Gate A, 2026-10-03) · Owner: tkaymak · Date: 2026-10-03 · Revision 9 (Kafka 4.3.1; Phase-4 verification fixes, see §9; Confluent Schema Registry per owner decision)
 
 This document is the **single source of truth**. Implement exactly what is specified. If something you need is not specified, do **not** guess. Stop and list the open question in your final answer.
 
@@ -11,7 +11,7 @@ This document is the **single source of truth**. Implement exactly what is speci
 - It is used in the FHNW course "CAS Data Engineering – Big Data" (German-speaking students, laptops with 4–8 GB of RAM for Docker, a mix of Apple Silicon/arm64 and x86/amd64).
 - Goal: a local playground where students can:
   1. generate fake data with **flink-faker**,
-  2. write it to **Apache Kafka 4.1.1 (KRaft)**,
+  2. write it to **Apache Kafka 4.3.1 (KRaft)**,
   3. query it with **Flink SQL 2.2.1** (windowing with TUMBLE/HOP/SESSION),
   4. sink results into **PostgreSQL**,
   5. use **Avro with a Schema Registry**,
@@ -28,9 +28,9 @@ This document is the **single source of truth**. Implement exactly what is speci
 | Postgres JDBC driver | `https://repo1.maven.org/maven2/org/postgresql/postgresql/42.7.13/postgresql-42.7.13.jar` |
 | Avro Confluent format | `https://repo1.maven.org/maven2/org/apache/flink/flink-sql-avro-confluent-registry/2.2.1/flink-sql-avro-confluent-registry-2.2.1.jar` |
 | flink-faker | build arg `FAKER_JAR_URL`, default `https://github.com/tkaymak/flink-faker/releases/download/v0.6.0/flink-faker-0.6.0.jar` (this release is published later. For local test builds pass `--build-arg FAKER_JAR_URL=https://github.com/knaufk/flink-faker/releases/download/v0.5.3/flink-faker-0.5.3.jar`, which exists but only works with Flink 1.17 at runtime; the reviewer swaps in the real 0.6.0 jar) |
-| Kafka | `apache/kafka:4.1.1` (KRaft, no ZooKeeper; CLI tools in `/opt/kafka/bin`) |
+| Kafka | `apache/kafka:4.3.1` (KRaft, no ZooKeeper; CLI tools in `/opt/kafka/bin`) |
 | Schema Registry | `confluentinc/cp-schema-registry:8.2.4` (the reference implementation, as discussed on the Day-2 slides; memory-trimmed via heap/JVM flags, §3.4) |
-| Kafka UI | `redpandadata/console:v3.12.0` (Redpanda Console, Go; works with Apache Kafka 4.1 and Confluent-compatible schema registries; measured ~50 MB vs ~400 MB for kafbat/kafka-ui) |
+| Kafka UI | `redpandadata/console:v3.12.0` (Redpanda Console, Go; works with Apache Kafka 4.x and Confluent-compatible schema registries; measured ~50 MB vs ~400 MB for kafbat/kafka-ui) |
 | PostgreSQL | `postgres:18.6` |
 | Beam Flink job server jar | `https://repo1.maven.org/maven2/org/apache/beam/beam-runners-flink-2.2-job-server/2.76.0/beam-runners-flink-2.2-job-server-2.76.0.jar` (exists; Beam 2.76.0 supports Flink 2.0/2.1/2.2; it also contains KafkaIO, kafka-clients and the embedded Java SDK harness, verified) |
 | Beam expansion service (slim) | `https://repo1.maven.org/maven2/org/apache/beam/beam-sdks-java-expansion-service-app/2.76.0/beam-sdks-java-expansion-service-app-2.76.0.jar` (62 MB) plus the KafkaIO classpath jars in §3.5. Do **not** use `beam-sdks-java-io-expansion-service` (832 MB in 2.76.0; streaming it as a staged artifact over gRPC fails with `OutOfMemoryError: Cannot reserve … direct buffer memory`, verified) |
@@ -45,8 +45,8 @@ Docker Desktop on student laptops often has only 4 GB, so optional parts use **c
 
 | Service (= `container_name`) | Profiles | Image / build | Host port → container | `mem_limit` | Measured RSS (4 SQL jobs running) |
 |---|---|---|---|---|---|
-| `kafka` | (core) | `apache/kafka:4.1.1` | 29092 → 29092 | 512m | ~170–345 MB |
-| `kafka-init` | (core) | `apache/kafka:4.1.1` | – | 256m | exits after a few seconds |
+| `kafka` | (core) | `apache/kafka:4.3.1` | 29092 → 29092 | 512m | ~250–380 MB |
+| `kafka-init` | (core) | `apache/kafka:4.3.1` | – | 256m | exits after a few seconds |
 | `jobmanager` | (core) | `flink:2.2.1-scala_2.12-java17` (official image, no build) | 8081 → 8081 | 1024m | ~610 MB (~720 MB after Beam jobs: the job-server jar is uploaded as a blob, page cache counts) |
 | `taskmanager` | (core) | `flink:2.2.1-scala_2.12-java17` (official image, no build) | – | 1536m | ~650–740 MB (≈780 MB while a Beam Kafka pipeline runs; KafkaIO runs embedded in the TaskManager JVM) |
 | `sql-client` | (core) | build: context `./sql-client`, `args: FAKER_JAR_URL: ${FAKER_JAR_URL:-https://github.com/tkaymak/flink-faker/releases/download/v0.6.0/flink-faker-0.6.0.jar}`, `image: flink-playground-sql-client:2.2.1` | – | 512m | ~6 MB idle (JVM only while a client session runs) |
@@ -472,3 +472,4 @@ beam/data/output/
 - Faker 0.6.0 (Flink 2.2.1 build) generates rows on the cluster (acceptance 5 of the faker DESIGN).
 - Fixed in Revision 7: `-l file://` in `sql-client.sh`; JVM flags via `FLINK_ENV_JAVA_OPTS_*`; `restart: unless-stopped` for jobmanager/taskmanager; bounded reads in examples 01/03/05.
 - Fixed in Revision 8: Beam KafkaIO via EMBEDDED environment + slim expansion service (832 MB jar dropped), `flink/` image removed, wordcount without `WriteToText`.
+- Revision 9 (2026-10-04): Kafka 4.1.1 → 4.3.1 (Share Groups GA since 4.2). Full clean run passed: examples 01–05, console, Schema Registry, Postgres, Beam wordcount and Beam KafkaIO pipeline (Beam bundles kafka-clients 3.9.2, compatible with 4.x brokers). Memory: core with 02+03 ≈ 1.63 GB (kafka 249 MB), everything incl. Beam ≈ 2.75 GB (≤ Rev. 8).

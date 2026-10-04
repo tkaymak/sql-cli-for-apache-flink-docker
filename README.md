@@ -1,6 +1,6 @@
 # Flink SQL & Beam Playground (Flink 2.2, Kafka 4, faker)
 
-A lean, containerised streaming and batch data engineering playground built for hands-on learning and prototyping. It bundles **Apache Flink 2.2.1**, **Apache Kafka 4.1.1 (KRaft)**, **flink-faker**, **Confluent Schema Registry**, **PostgreSQL**, **Redpanda Console**, and **Apache Beam 2.76.0 (Python on Flink)**.
+A lean, containerised streaming and batch data engineering playground built for hands-on learning and prototyping. It bundles **Apache Flink 2.2.1**, **Apache Kafka 4.3.1 (KRaft)**, **flink-faker**, **Confluent Schema Registry**, **PostgreSQL**, **Redpanda Console**, and **Apache Beam 2.76.0 (Python on Flink)**.
 
 Everything runs locally via Docker Compose on both **Apple Silicon (arm64)** and **Intel/AMD (amd64)** without requiring local Java, Maven, or Python installations.
 
@@ -12,8 +12,8 @@ The environment uses Docker Compose profiles so that only the lightweight core s
 
 | Service (`container_name`) | Profiles | Image / Build Context | Host Port → Container | Memory Limit (`mem_limit`) | Measured RSS | Description |
 |---|---|---|---|---|---|---|
-| `kafka` | *(core)* | `apache/kafka:4.1.1` | `29092:29092` | 512m | ~170–345 MB | Kafka 4.1 broker in KRaft combined mode (no ZooKeeper) |
-| `kafka-init` | *(core)* | `apache/kafka:4.1.1` | – | 256m | *exits* | One-shot container pre-creating default topics (`orders`, `orders_avro`, `beam_product_counts`) |
+| `kafka` | *(core)* | `apache/kafka:4.3.1` | `29092:29092` | 512m | ~250–380 MB | Kafka 4.3 broker in KRaft combined mode (no ZooKeeper) |
+| `kafka-init` | *(core)* | `apache/kafka:4.3.1` | – | 256m | *exits* | One-shot container pre-creating default topics (`orders`, `orders_avro`, `beam_product_counts`) |
 | `jobmanager` | *(core)* | `flink:2.2.1-scala_2.12-java17` (official image, no build) | `8081:8081` | 1024m | ~610 MB | Flink 2.2.1 JobManager & Web UI (~720 MB after Beam jobs: job-server jar uploaded as blob) |
 | `taskmanager` | *(core)* | `flink:2.2.1-scala_2.12-java17` (official image, no build) | – | 1536m | ~650–740 MB | Flink TaskManager with 8 slots (≈780 MB while Beam Kafka pipeline runs; KafkaIO runs embedded) |
 | `sql-client` | *(core)* | `./sql-client` (`flink-playground-sql-client:2.2.1`, build arg `FAKER_JAR_URL`) | – | 512m | ~6 MB idle | Flink SQL Client pre-loaded with Kafka, JDBC Postgres, Avro, and faker connectors |
