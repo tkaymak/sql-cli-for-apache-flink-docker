@@ -1,5 +1,101 @@
 # Flink SQL & Beam Playground (Flink 2.2, Kafka 4, faker)
 
+## Kurs-Quickstart (CAS Data Engineering, FHNW)
+
+Kompakte Schritt-für-Schritt-Anleitung für die Übungen im CAS Data Engineering:
+
+1. **Repository klonen und ins Verzeichnis wechseln:**
+   ```bash
+   git clone https://github.com/tkaymak/sql-cli-for-apache-flink-docker.git
+   cd sql-cli-for-apache-flink-docker
+   ```
+
+2. **Core-Services starten (Docker Desktop benötigt mind. 4 GB RAM; Core belegt ca. 1.6 GB):**
+   ```bash
+   docker compose up -d --build
+   ```
+
+3. **Flink Web UI aufrufen:**
+   Öffne [http://localhost:8081](http://localhost:8081) im Browser. Unter *Task Managers* sollte 1 TaskManager mit 8 Task Slots angezeigt werden.
+
+4. **Erstes SQL-Beispiel ausführen (Faker-Grundlagen):**
+   ```bash
+   ./run-example.sh examples/01_faker_basics.sql
+   ```
+   Erzeugt 10 Zufallsdatensätze mit flink-faker via begrenztem Lesen (`number-of-rows = 10`) und gibt sie tabellarisch im Terminal aus.
+
+5. **Kontinuierlichen Datenstrom nach Kafka starten:**
+   ```bash
+   ./run-example.sh examples/02_faker_to_kafka_json.sql
+   ```
+   Sendet einen Streaming-Job ab, der kontinuierlich JSON-Datensätze in das Kafka-Topic `orders` schreibt. Der Job läuft dauerhaft im Flink-Cluster (in der Web UI unter *Running Jobs* sichtbar).
+
+6. **Streaming-Fenster aggregieren:**
+   Beispiel 02 für mindestens ca. 30 Sekunden laufen lassen, damit Daten in Kafka vorhanden sind.
+   ```bash
+   ./run-example.sh examples/03_windows_tumble_hop_session.sql
+   ```
+   Führt nacheinander TUMBLE- (10s), HOP- (20s mit 5s Slide) und SESSION-Fenster-Aggregationen (5s Lücke) auf einem begrenzten Snapshot (`latest-offset`) der Daten aus Kafka aus und beendet sich nach jeweils 10 Zeilen sauber.
+
+7. **Optionale Module nach Bedarf hinzuschalten:**
+   - **Kafka Web UI (Redpanda Console):**
+     ```bash
+     docker compose --profile ui up -d
+     ```
+     UI unter [http://localhost:8080](http://localhost:8080) öffnen, um Topics (`orders`, `orders_avro`, `beam_product_counts`) und Nachrichten im Browser zu inspizieren.
+   - **PostgreSQL Sink:**
+     ```bash
+     docker compose --profile postgres up -d
+     ./run-example.sh examples/04_kafka_to_postgres.sql
+     ```
+     Aggregierte Daten nach ca. 1–2 Minuten in PostgreSQL prüfen:
+     ```bash
+     docker compose exec postgres psql -U flink -d playground -c "SELECT count(*) FROM product_revenue;"
+     ```
+   - **Avro & Confluent Schema Registry:**
+     ```bash
+     docker compose --profile avro up -d
+     ./run-example.sh examples/05_avro_schema_registry.sql
+     ```
+     Schema-Registrierung überprüfen:
+     ```bash
+     curl -s http://localhost:8085/subjects
+     ```
+   - **Apache Beam (Python auf Flink):**
+     ```bash
+     docker compose --profile beam up -d --build
+     docker compose exec beam-client python wordcount.py
+     cat beam/data/output/wordcount.txt
+     ```
+     *(Verifizierbar: enthält `ist: 6`.)*
+     
+     Streaming-Pipeline im Hintergrund (`-d`) ausführen (Beispiel 02 muss laufen):
+     ```bash
+     docker compose exec -d beam-client python kafka_window_count.py
+     ```
+     Ausgabe im Kafka-Topic `beam_product_counts` prüfen:
+     ```bash
+     docker compose exec kafka /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server localhost:9092 --topic beam_product_counts --from-beginning
+     ```
+   - **Triggers & Akkumulation (Kurstag 3):**
+     Streaming-Pipeline mit Triggern im Hintergrund (`-d`) ausführen (Beispiel 02 muss laufen):
+     ```bash
+     docker compose exec -d beam-client python kafka_window_triggers.py
+     ```
+     *(Oder im Discarding-Modus: `docker compose exec -d beam-client python kafka_window_triggers.py --mode discarding`.)*
+     
+     Ausgabe im Kafka-Topic `beam_window_triggers` prüfen:
+     ```bash
+     docker compose exec kafka /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server localhost:9092 --topic beam_window_triggers --from-beginning
+     ```
+     Frühe (`EARLY`), pünktliche (`ON_TIME`) und verspätete (`LATE`) Panes feuern separat anhand von Event-Time-Wasserzeichen und Verarbeitungszeit. Im Modus `accumulating` summieren Folge-Panes frühere Werte auf, während `discarding` nur die jeweils neu hinzugekommenen Elemente ausgibt.
+
+8. **Umgebung vollständig stoppen und aufräumen:**
+   ```bash
+   docker compose --profile all down -v
+   ```
+---
+
 A lean, containerised streaming and batch data engineering playground built for hands-on learning and prototyping. It bundles **Apache Flink 2.2.1**, **Apache Kafka 4.3.1 (KRaft)**, **flink-faker**, **Confluent Schema Registry**, **PostgreSQL**, **Redpanda Console**, and **Apache Beam 2.76.0 (Python on Flink)**.
 
 Everything runs locally via Docker Compose on both **Apple Silicon (arm64)** and **Intel/AMD (amd64)** without requiring local Java, Maven, or Python installations.
@@ -348,100 +444,3 @@ docker compose --profile all down -v
 - **Redpanda Console** (`redpandadata/console`) is distributed by Redpanda Data under the Business Source License (BSL) / Community Edition.
 - **Apache Flink**, **Apache Kafka**, and **Apache Beam** are trademarks or registered trademarks of the [Apache Software Foundation](https://www.apache.org/).
 - **Docker** is a trademark of Docker, Inc.
-
----
-
-## Kurs-Quickstart (CAS Data Engineering, FHNW)
-
-Kompakte Schritt-für-Schritt-Anleitung für die Übungen im CAS Data Engineering:
-
-1. **Repository klonen und ins Verzeichnis wechseln:**
-   ```bash
-   git clone https://github.com/tkaymak/sql-cli-for-apache-flink-docker.git
-   cd sql-cli-for-apache-flink-docker
-   ```
-
-2. **Core-Services starten (Docker Desktop benötigt mind. 4 GB RAM; Core belegt ca. 1.6 GB):**
-   ```bash
-   docker compose up -d --build
-   ```
-
-3. **Flink Web UI aufrufen:**
-   Öffne [http://localhost:8081](http://localhost:8081) im Browser. Unter *Task Managers* sollte 1 TaskManager mit 8 Task Slots angezeigt werden.
-
-4. **Erstes SQL-Beispiel ausführen (Faker-Grundlagen):**
-   ```bash
-   ./run-example.sh examples/01_faker_basics.sql
-   ```
-   Erzeugt 10 Zufallsdatensätze mit flink-faker via begrenztem Lesen (`number-of-rows = 10`) und gibt sie tabellarisch im Terminal aus.
-
-5. **Kontinuierlichen Datenstrom nach Kafka starten:**
-   ```bash
-   ./run-example.sh examples/02_faker_to_kafka_json.sql
-   ```
-   Sendet einen Streaming-Job ab, der kontinuierlich JSON-Datensätze in das Kafka-Topic `orders` schreibt. Der Job läuft dauerhaft im Flink-Cluster (in der Web UI unter *Running Jobs* sichtbar).
-
-6. **Streaming-Fenster aggregieren:**
-   Beispiel 02 für mindestens ca. 30 Sekunden laufen lassen, damit Daten in Kafka vorhanden sind.
-   ```bash
-   ./run-example.sh examples/03_windows_tumble_hop_session.sql
-   ```
-   Führt nacheinander TUMBLE- (10s), HOP- (20s mit 5s Slide) und SESSION-Fenster-Aggregationen (5s Lücke) auf einem begrenzten Snapshot (`latest-offset`) der Daten aus Kafka aus und beendet sich nach jeweils 10 Zeilen sauber.
-
-7. **Optionale Module nach Bedarf hinzuschalten:**
-   - **Kafka Web UI (Redpanda Console):**
-     ```bash
-     docker compose --profile ui up -d
-     ```
-     UI unter [http://localhost:8080](http://localhost:8080) öffnen, um Topics (`orders`, `orders_avro`, `beam_product_counts`) und Nachrichten im Browser zu inspizieren.
-   - **PostgreSQL Sink:**
-     ```bash
-     docker compose --profile postgres up -d
-     ./run-example.sh examples/04_kafka_to_postgres.sql
-     ```
-     Aggregierte Daten nach ca. 1–2 Minuten in PostgreSQL prüfen:
-     ```bash
-     docker compose exec postgres psql -U flink -d playground -c "SELECT count(*) FROM product_revenue;"
-     ```
-   - **Avro & Confluent Schema Registry:**
-     ```bash
-     docker compose --profile avro up -d
-     ./run-example.sh examples/05_avro_schema_registry.sql
-     ```
-     Schema-Registrierung überprüfen:
-     ```bash
-     curl -s http://localhost:8085/subjects
-     ```
-   - **Apache Beam (Python auf Flink):**
-     ```bash
-     docker compose --profile beam up -d --build
-     docker compose exec beam-client python wordcount.py
-     cat beam/data/output/wordcount.txt
-     ```
-     *(Verifizierbar: enthält `ist: 6`.)*
-     
-     Streaming-Pipeline im Hintergrund (`-d`) ausführen (Beispiel 02 muss laufen):
-     ```bash
-     docker compose exec -d beam-client python kafka_window_count.py
-     ```
-     Ausgabe im Kafka-Topic `beam_product_counts` prüfen:
-     ```bash
-     docker compose exec kafka /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server localhost:9092 --topic beam_product_counts --from-beginning
-     ```
-   - **Triggers & Akkumulation (Kurstag 3):**
-     Streaming-Pipeline mit Triggern im Hintergrund (`-d`) ausführen (Beispiel 02 muss laufen):
-     ```bash
-     docker compose exec -d beam-client python kafka_window_triggers.py
-     ```
-     *(Oder im Discarding-Modus: `docker compose exec -d beam-client python kafka_window_triggers.py --mode discarding`.)*
-     
-     Ausgabe im Kafka-Topic `beam_window_triggers` prüfen:
-     ```bash
-     docker compose exec kafka /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server localhost:9092 --topic beam_window_triggers --from-beginning
-     ```
-     Frühe (`EARLY`), pünktliche (`ON_TIME`) und verspätete (`LATE`) Panes feuern separat anhand von Event-Time-Wasserzeichen und Verarbeitungszeit. Im Modus `accumulating` summieren Folge-Panes frühere Werte auf, während `discarding` nur die jeweils neu hinzugekommenen Elemente ausgibt.
-
-8. **Umgebung vollständig stoppen und aufräumen:**
-   ```bash
-   docker compose --profile all down -v
-   ```
