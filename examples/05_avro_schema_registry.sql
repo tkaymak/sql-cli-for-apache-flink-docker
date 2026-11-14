@@ -15,7 +15,7 @@ CREATE TEMPORARY TABLE orders_faker (
   'connector' = 'faker',
   'rows-per-second' = '5',
   'fields.order_id.expression'   = '#{Internet.uuid}',
-  'fields.customer.expression'   = '#{Name.firstName}',
+  'fields.customer.expression'   = '#{Options.option ''Anna'',''Ben'',''Clara'',''David'',''Eva'',''Finn'',''Greta'',''Hans'',''Ida'',''Jonas'',''Klara'',''Leo'',''Mia'',''Noah'',''Olga'',''Paul'',''Rosa'',''Sven'',''Tina'',''Urs''}',
   'fields.product.expression'    = '#{Options.option ''Laptop'',''Phone'',''Tablet'',''Monitor'',''Keyboard''}',
   'fields.amount.expression'     = '#{Number.randomDouble ''2'',''5'',''500''}',
   'fields.order_time.expression' = '#{date.past ''5'',''SECONDS''}'

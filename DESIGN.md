@@ -330,7 +330,7 @@ CREATE TEMPORARY TABLE orders_faker (
   'connector' = 'faker',
   'rows-per-second' = '5',
   'fields.order_id.expression'   = '#{Internet.uuid}',
-  'fields.customer.expression'   = '#{Name.firstName}',
+  'fields.customer.expression'   = '#{Options.option ''Anna'',''Ben'',''Clara'',''David'',''Eva'',''Finn'',''Greta'',''Hans'',''Ida'',''Jonas'',''Klara'',''Leo'',''Mia'',''Noah'',''Olga'',''Paul'',''Rosa'',''Sven'',''Tina'',''Urs''}',
   'fields.product.expression'    = '#{Options.option ''Laptop'',''Phone'',''Tablet'',''Monitor'',''Keyboard''}',
   'fields.amount.expression'     = '#{Number.randomDouble ''2'',''5'',''500''}',
   'fields.order_time.expression' = '#{date.past ''5'',''SECONDS''}'
@@ -499,3 +499,4 @@ beam/data/output/
 - Fixed in Revision 8: Beam KafkaIO via EMBEDDED environment + slim expansion service (832 MB jar dropped), `flink/` image removed, wordcount without `WriteToText`.
 - Revision 9 (2026-10-04): Kafka 4.1.1 → 4.3.1 (Share Groups GA since 4.2). Full clean run passed: examples 01–05, console, Schema Registry, Postgres, Beam wordcount and Beam KafkaIO pipeline (Beam bundles kafka-clients 3.9.2, compatible with 4.x brokers). Memory: core with 02+03 ≈ 1.63 GB (kafka 249 MB), everything incl. Beam ≈ 2.75 GB (≤ Rev. 8).
 - Revision 10 (2026-10-04): Beam trigger example (§3.7) verified: EARLY/ON_TIME/LATE panes, accumulating vs. discarding differ as on the day-3 slides. TaskManager metaspace 160m → 320m after a reproduced metaspace OOM with two Beam jobs. Clean run with all SQL examples + wordcount + three concurrent Beam streaming jobs: no TaskManager restart; memory with everything ≈ 3.1 GB (beam-client ≈ 1.25 GB with three pipelines, ≈ 0.4 GB per streaming pipeline).
+- Revision 11 (2026-11-14): `customer` is drawn from a fixed list of 20 first names instead of `#{Name.firstName}` (examples 01, 02, 05). With random names every SESSION window held exactly one order, which made the session example useless for teaching. README: course notes (example 02 keeps running, interactive client starts without tables) and a "Harmless Log Noise" troubleshooting entry.

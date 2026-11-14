@@ -37,6 +37,11 @@ Kompakte Schritt-für-Schritt-Anleitung für die Übungen im CAS Data Engineerin
    ```
    Führt nacheinander TUMBLE- (10s), HOP- (20s mit 5s Slide) und SESSION-Fenster-Aggregationen (5s Lücke) auf einem begrenzten Snapshot (`latest-offset`) der Daten aus Kafka aus und beendet sich nach jeweils 10 Zeilen sauber.
 
+   > **Gut zu wissen:**
+   > - Beispiel 02 läuft im Hintergrund weiter, bis es gestoppt wird: in der Flink Web UI unter *Running Jobs* den Job öffnen und *Cancel Job* wählen (oder am Ende alles mit Schritt 8 abräumen). Wer Beispiel 02 ein zweites Mal startet, schreibt doppelt so viele Bestellungen.
+   > - Die `WARNING`-Zeilen beim Start des SQL-Clients (`jdk.compiler`, `dumb terminal`) sind harmlos.
+   > - Der interaktive Client (`docker compose exec sql-client /opt/sql-client/sql-client.sh`) startet ohne Tabellen, weil die Beispiele `TEMPORARY`-Tabellen anlegen. Zuerst die `CREATE TEMPORARY TABLE`-Anweisungen aus der Beispieldatei einfügen, dann eigene Abfragen schreiben. Beenden mit `QUIT;`.
+
 7. **Optionale Module nach Bedarf hinzuschalten:**
    - **Kafka Web UI (Redpanda Console):**
      ```bash
@@ -272,7 +277,7 @@ Submits a continuous streaming `INSERT INTO orders_kafka SELECT * FROM orders_fa
 Creates a bounded snapshot (`orders_snapshot WITH ('scan.bounded.mode' = 'latest-offset') LIKE orders_kafka;`) reading the topic from earliest offset up to query start (dynamic table hints are not permitted inside window TVF `TABLE ...` arguments). Evaluates event-time watermarks and prints 10 rows for each window type before terminating cleanly (~6 s):
 - **Tumble Window:** Non-overlapping 10-second intervals aggregating order count and revenue per product.
 - **Hopping Window:** 20-second windows advancing every 5 seconds.
-- **Session Window:** Dynamic windows grouped per customer with a 5-second inactivity gap.
+- **Session Window:** Dynamic windows grouped per customer with a 5-second inactivity gap. The faker draws customers from a fixed list of 20 names, so a customer usually places several orders per session.
 
 #### 4. Kafka to PostgreSQL Sink
 ```bash
@@ -425,6 +430,11 @@ If a container fails to bind to a host port, check whether another process on yo
   ```bash
   docker compose stop console schema-registry postgres beam-client
   ```
+
+### Harmless Log Noise
+
+- Each `./run-example.sh` run prints `WARNING: Unknown module: jdk.compiler specified to --add-exports` and `Unable to create a system terminal, creating a dumb terminal`. Both come from the SQL client start-up and can be ignored.
+- After a bounded Kafka read finishes (example 03), the JobManager log may show `NoClassDefFoundError: ... kafka/common/network/Selector$CloseMode`. It was observed while the source shut down (2026-11-14); the query results were complete and correct.
 
 ### Full Clean Teardown
 
