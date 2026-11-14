@@ -72,28 +72,42 @@ Kompakte Schritt-für-Schritt-Anleitung für die Übungen im CAS Data Engineerin
      docker compose exec beam-client python wordcount.py
      cat beam/data/output/wordcount.txt
      ```
-     *(Verifizierbar: enthält `ist: 6`.)*
+     *(Verifizierbar: enthält `ist: 6`.)* Die `WARNING`-Zeilen und die einzelne Zahl `13` in der Ausgabe von `wordcount.py` sind harmlos.
      
-     Streaming-Pipeline im Hintergrund (`-d`) ausführen (Beispiel 02 muss laufen):
+     Streaming-Pipeline im Hintergrund (`-d`) ausführen (Beispiel 02 muss laufen). Der Befehl gibt nichts aus; der Job erscheint nach ca. 20 Sekunden in der Flink Web UI als `BeamApp-root-…`:
      ```bash
      docker compose exec -d beam-client python kafka_window_count.py
      ```
-     Ausgabe im Kafka-Topic `beam_product_counts` prüfen:
+     Nach gut einer Minute die Ausgabe im Kafka-Topic `beam_product_counts` prüfen (eine Zeile pro Produkt und Minute). Der Consumer läuft weiter, beenden mit `CTRL+C`:
      ```bash
      docker compose exec kafka /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server localhost:9092 --topic beam_product_counts --from-beginning
      ```
    - **Triggers & Akkumulation (Kurstag 3):**
+     Höchstens zwei Beam-Streaming-Jobs gleichzeitig laufen lassen. Deshalb zuerst den Fenster-Job von oben beenden: Flink Web UI → *Running Jobs* → Job `BeamApp-root-…` öffnen → *Cancel Job*.
+
      Streaming-Pipeline mit Triggern im Hintergrund (`-d`) ausführen (Beispiel 02 muss laufen):
      ```bash
      docker compose exec -d beam-client python kafka_window_triggers.py
      ```
-     *(Oder im Discarding-Modus: `docker compose exec -d beam-client python kafka_window_triggers.py --mode discarding`.)*
-     
-     Ausgabe im Kafka-Topic `beam_window_triggers` prüfen:
+     3 bis 4 Minuten warten, dann die Ausgabe im Kafka-Topic `beam_window_triggers` prüfen (beenden mit `CTRL+C`):
      ```bash
      docker compose exec kafka /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server localhost:9092 --topic beam_window_triggers --from-beginning
      ```
-     Frühe (`EARLY`), pünktliche (`ON_TIME`) und verspätete (`LATE`) Panes feuern separat anhand von Event-Time-Wasserzeichen und Verarbeitungszeit. Im Modus `accumulating` summieren Folge-Panes frühere Werte auf, während `discarding` nur die jeweils neu hinzugekommenen Elemente ausgibt.
+     Die ersten Zeilen erscheinen nach 1 bis 2 Minuten. Ein Fenster dauert 120 Sekunden; das volle Bild mit `EARLY`, `ON_TIME` und `LATE` für dasselbe Fenster ist deshalb erst nach 3 bis 4 Minuten da. `window_start` und `window_end` sind in UTC.
+
+     Danach denselben Job zusätzlich im Discarding-Modus starten und dieselben Fenster vergleichen. Beide Jobs schreiben in dasselbe Topic; das Feld `mode` unterscheidet sie:
+     ```bash
+     docker compose exec -d beam-client python kafka_window_triggers.py --mode discarding
+     docker compose exec kafka /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server localhost:9092 --topic beam_window_triggers --from-beginning | grep discarding
+     ```
+     Frühe (`EARLY`), pünktliche (`ON_TIME`) und verspätete (`LATE`) Panes feuern separat anhand von Event-Time-Wasserzeichen und Verarbeitungszeit. Im Modus `accumulating` summieren Folge-Panes frühere Werte auf, während `discarding` nur die jeweils neu hinzugekommenen Elemente ausgibt. Beispiel für ein Fenster und ein Produkt (gemessen am 15.11.2026):
+
+     | Pane | `accumulating` | `discarding` |
+     |---|---|---|
+     | 0 `EARLY` | 48 | 48 |
+     | 1 `ON_TIME` | 113 | 65 |
+     | 2 `LATE` | 114 | 1 |
+     | 3 `LATE` | 115 | 1 |
 
 8. **Umgebung vollständig stoppen und aufräumen:**
    ```bash
@@ -353,8 +367,8 @@ Instead of running separate worker-pool or persistent expansion-service containe
    - Consumes JSON order events from Kafka `orders` topic using KafkaIO (timestamps assigned by KafkaIO as processing time).
    - Calculates 60-second fixed tumbling window counts per product.
    - Writes result JSON tuples back to Kafka topic `beam_product_counts`.
-   - View the running job in Flink Web UI ([http://localhost:8081](http://localhost:8081)).
-   - Verify messages in `beam_product_counts` using the Kafka console consumer:
+   - View the running job in Flink Web UI ([http://localhost:8081](http://localhost:8081)). Beam jobs are listed as `BeamApp-root-<timestamp>-<id>`; the `exec -d` command itself prints nothing.
+   - Verify messages in `beam_product_counts` using the Kafka console consumer (first results after about one minute; the consumer keeps running, stop it with `CTRL+C`):
      ```bash
      docker compose exec kafka /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server localhost:9092 --topic beam_product_counts --from-beginning
      ```
@@ -368,6 +382,8 @@ Instead of running separate worker-pool or persistent expansion-service containe
    docker compose exec -d beam-client python kafka_window_triggers.py
    ```
    *(Or run with discarding mode: `docker compose exec -d beam-client python kafka_window_triggers.py --mode discarding`.)*
+   - Both modes write to the same topic; the JSON field `mode` tells them apart (append `| grep discarding` to the consumer command). Start `accumulating` first, then `discarding` as a second job, and compare the same window. Cancel other Beam streaming jobs first (see [Several Beam Pipelines at Once](#several-beam-pipelines-at-once)).
+   - The first panes arrive after 1–2 minutes; a complete `EARLY` → `ON_TIME` → `LATE` sequence for one window takes 3–4 minutes (120 s window). `window_start` / `window_end` are UTC.
    - Consumes new JSON order events from Kafka `orders` topic using KafkaIO (`auto.offset.reset: latest`).
    - Assigns event-time timestamps from `order_time` and computes 120-second fixed window counts per product.
    - Evaluates composite triggers (`AfterWatermark` with early firing after 60 s processing time, on-time firing at watermark, and late firings per element up to 300 s allowed lateness).
@@ -434,6 +450,8 @@ If a container fails to bind to a host port, check whether another process on yo
 ### Harmless Log Noise
 
 - Each `./run-example.sh` run prints `WARNING: Unknown module: jdk.compiler specified to --add-exports` and `Unable to create a system terminal, creating a dumb terminal`. Both come from the SQL client start-up and can be ignored.
+- `wordcount.py` prints a few `WARNING:root:Waiting for grpc channel to be ready` and `Really starting/destroying service` lines and a lone `13` (the number of result lines). All of this is expected.
+- When a Beam job ends or is cancelled, the TaskManager log may show `NoClassDefFoundError: ... IntObjectHashMap` and `IllegalStateException: call already closed`. Observed on 2026-11-14 at job shutdown; running jobs were not affected.
 - After a bounded Kafka read finishes (example 03), the JobManager log may show `NoClassDefFoundError: ... kafka/common/network/Selector$CloseMode`. It was observed while the source shut down (2026-11-14); the query results were complete and correct.
 
 ### Full Clean Teardown
