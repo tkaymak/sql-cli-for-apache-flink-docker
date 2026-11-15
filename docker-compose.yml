@@ -71,24 +71,25 @@ services:
   taskmanager:
     container_name: taskmanager
     image: flink:2.2.1-scala_2.12-java17
-    mem_limit: 1536m
+    mem_limit: 1792m
     restart: unless-stopped
     command: taskmanager
     environment:
       FLINK_PROPERTIES: |
         jobmanager.rpc.address: jobmanager
         taskmanager.numberOfTaskSlots: 8
-        taskmanager.memory.process.size: 1056m
+        taskmanager.memory.process.size: 1312m
         taskmanager.memory.managed.size: 96m
         taskmanager.memory.framework.heap.size: 64m
         taskmanager.memory.framework.off-heap.size: 32m
+        taskmanager.memory.task.off-heap.size: 64m
         taskmanager.memory.network.min: 48m
         taskmanager.memory.network.max: 64m
-        taskmanager.memory.jvm-metaspace.size: 320m
+        taskmanager.memory.jvm-metaspace.size: 512m
         taskmanager.memory.jvm-overhead.min: 64m
         taskmanager.memory.jvm-overhead.max: 64m
         parallelism.default: 1
-      FLINK_ENV_JAVA_OPTS_TM: "-XX:+UseSerialGC -XX:TieredStopAtLevel=1 -XX:ReservedCodeCacheSize=48m -Xss512k"
+      FLINK_ENV_JAVA_OPTS_TM: "-XX:+UseSerialGC -XX:TieredStopAtLevel=1 -XX:ReservedCodeCacheSize=48m -Xss512k -Dorg.apache.beam.vendor.grpc.v1p69p0.io.netty.allocator.numDirectArenas=1"
     depends_on:
       jobmanager:
         condition: service_started

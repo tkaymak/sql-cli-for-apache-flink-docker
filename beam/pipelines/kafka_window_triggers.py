@@ -61,37 +61,41 @@ def run(argv: list[str] | None = None) -> None:
     extra_args = ["--experiments=use_deprecated_read"] + remaining_args
     options = flink_options(streaming=True, extra_args=extra_args)
 
-    with beam.Pipeline(options=options) as p:
-        (
-            p
-            # 'latest': nur neue Bestellungen lesen, damit Early-, On-Time- und Late-Firings live beobachtet werden können.
-            | "ReadFromKafka" >> ReadFromKafka(
-                consumer_config={
-                    "bootstrap.servers": "kafka:9092",
-                    "auto.offset.reset": "latest",
-                    "group.id": f"beam-window-triggers-{mode}",
-                },
-                topics=["orders"],
-                expansion_service=kafka_expansion_service(),
-            )
-            | "ExtractEventTime" >> beam.Map(to_timestamped)
-            | "WindowAndTrigger" >> beam.WindowInto(
-                window.FixedWindows(120),
-                trigger=trigger.AfterWatermark(
-                    early=trigger.AfterProcessingTime(60),
-                    late=trigger.AfterCount(1)),
-                accumulation_mode=(trigger.AccumulationMode.ACCUMULATING if mode == "accumulating"
-                                   else trigger.AccumulationMode.DISCARDING),
-                allowed_lateness=300)
-            | "PairWithOne" >> beam.Map(lambda p: (p, 1))
-            | "CountPerKey" >> beam.CombinePerKey(sum)
-            | "Format" >> beam.ParDo(FormatWindowTriggerDoFn(mode)).with_output_types(typing.Tuple[bytes, bytes])
-            | "WriteToKafka" >> WriteToKafka(
-                producer_config={"bootstrap.servers": "kafka:9092"},
-                topic="beam_window_triggers",
-                expansion_service=kafka_expansion_service(),
-            )
+    # Kein "with beam.Pipeline(...)": Damit bliebe die Java-Hilfs-JVM (Expansion Service) der Kafka-Transforms
+    # bis zum Ende des Jobs im Speicher (ca. 0.25 GB). So lebt sie nur, waehrend die Pipeline gebaut wird.
+    p = beam.Pipeline(options=options)
+    (
+        p
+        # 'latest': nur neue Bestellungen lesen, damit Early-, On-Time- und Late-Firings live beobachtet werden können.
+        | "ReadFromKafka" >> ReadFromKafka(
+            consumer_config={
+                "bootstrap.servers": "kafka:9092",
+                "auto.offset.reset": "latest",
+                "group.id": f"beam-window-triggers-{mode}",
+            },
+            topics=["orders"],
+            expansion_service=kafka_expansion_service(),
         )
+        | "ExtractEventTime" >> beam.Map(to_timestamped)
+        | "WindowAndTrigger" >> beam.WindowInto(
+            window.FixedWindows(120),
+            trigger=trigger.AfterWatermark(
+                early=trigger.AfterProcessingTime(60),
+                late=trigger.AfterCount(1)),
+            accumulation_mode=(trigger.AccumulationMode.ACCUMULATING if mode == "accumulating"
+                               else trigger.AccumulationMode.DISCARDING),
+            allowed_lateness=300)
+        | "PairWithOne" >> beam.Map(lambda p: (p, 1))
+        | "CountPerKey" >> beam.CombinePerKey(sum)
+        | "Format" >> beam.ParDo(FormatWindowTriggerDoFn(mode)).with_output_types(typing.Tuple[bytes, bytes])
+        | "WriteToKafka" >> WriteToKafka(
+            producer_config={"bootstrap.servers": "kafka:9092"},
+            topic="beam_window_triggers",
+            expansion_service=kafka_expansion_service(),
+        )
+    )
+    # Job an Flink uebergeben und warten: Dieser Prozess ist der Python-Worker (LOOPBACK) und muss weiterlaufen.
+    p.run().wait_until_finish()
 
 
 if __name__ == "__main__":

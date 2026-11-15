@@ -1,6 +1,6 @@
 # DESIGN: Flink 2.2 + Kafka + faker playground (with Beam on Flink)
 
-Status: APPROVED by owner (Gate A, 2026-10-03) · Owner: tkaymak · Date: 2026-10-03 · Revision 10 (Beam trigger example; Kafka 4.3.1; Phase-4 verification fixes, see §9; Confluent Schema Registry per owner decision)
+Status: APPROVED by owner (Gate A, 2026-10-03) · Owner: tkaymak · Date: 2026-10-03 · Revision 14 (revision log in §9; Rev. 14: Beam memory, §3.2/§3.6; Beam trigger example; Kafka 4.3.1; Phase-4 verification fixes, see §9; Confluent Schema Registry per owner decision)
 
 This document is the **single source of truth**. Implement exactly what is specified. If something you need is not specified, do **not** guess. Stop and list the open question in your final answer.
 
@@ -48,12 +48,12 @@ Docker Desktop on student laptops often has only 4 GB, so optional parts use **c
 | `kafka` | (core) | `apache/kafka:4.3.1` | 29092 → 29092 | 512m | ~250–380 MB |
 | `kafka-init` | (core) | `apache/kafka:4.3.1` | – | 256m | exits after a few seconds |
 | `jobmanager` | (core) | `flink:2.2.1-scala_2.12-java17` (official image, no build) | 8081 → 8081 | 1024m | ~610 MB (~720 MB after Beam jobs: the job-server jar is uploaded as a blob, page cache counts) |
-| `taskmanager` | (core) | `flink:2.2.1-scala_2.12-java17` (official image, no build) | – | 1536m | ~650–740 MB (≈780 MB while a Beam Kafka pipeline runs; KafkaIO runs embedded in the TaskManager JVM) |
+| `taskmanager` | (core) | `flink:2.2.1-scala_2.12-java17` (official image, no build) | – | 1792m (Rev. 14) | ~650–740 MB (≈870 MB while the first Beam Kafka pipeline runs; KafkaIO runs embedded in the TaskManager JVM; +70–80 MB for every further Beam streaming job of the same TaskManager lifetime, see §3.2) |
 | `sql-client` | (core) | build: context `./sql-client`, `args: FAKER_JAR_URL: ${FAKER_JAR_URL:-https://github.com/tkaymak/flink-faker/releases/download/v0.6.0/flink-faker-0.6.0.jar}`, `image: flink-playground-sql-client:2.2.1` | – | 512m | ~6 MB idle (JVM only while a client session runs) |
 | `console` | `ui`, `all` | `redpandadata/console:v3.12.0` | 8080 → 8080 | 192m | ~70–115 MB |
 | `schema-registry` | `avro`, `all` | `confluentinc/cp-schema-registry:8.2.4` | 8085 → 8085 | 512m | ~110–260 MB (measured) |
 | `postgres` | `postgres`, `all` | `postgres:18.6` | **5433** → 5432 | 256m | ~20–75 MB |
-| `beam-client` | `beam`, `all` | build: context `./beam`, `image: flink-playground-beam:2.76.0` | – | 1536m | idle ~20–40 MB; ~770–805 MB while a pipeline runs (Python + Beam job-server JVM; the expansion-service JVM only lives during pipeline construction) |
+| `beam-client` | `beam`, `all` | build: context `./beam`, `image: flink-playground-beam:2.76.0` | – | 1536m | idle ~20–40 MB; ~520 MB while a streaming pipeline runs (Rev. 14: Python ≈ 0.18 GB + Beam job-server JVM ≈ 0.4 GB; the expansion-service JVM only lives during pipeline construction, see §3.6) |
 
 - **Memory (measured on Docker Desktop, arm64, clean run 2026-10-03, Revision 8):** core with examples 02+03 ≈ **1.6 GB** (kafka 345 MB, jobmanager 610 MB, taskmanager 654 MB, sql-client 6 MB). Modules are switched on only when needed:
   - `ui` +70–115 MB
@@ -92,20 +92,28 @@ Docker Desktop on student laptops often has only 4 GB, so optional parts use **c
   ```
   jobmanager.rpc.address: jobmanager
   taskmanager.numberOfTaskSlots: 8
-  taskmanager.memory.process.size: 1056m
+  taskmanager.memory.process.size: 1312m
   taskmanager.memory.managed.size: 96m
   taskmanager.memory.framework.heap.size: 64m
   taskmanager.memory.framework.off-heap.size: 32m
+  taskmanager.memory.task.off-heap.size: 64m
   taskmanager.memory.network.min: 48m
   taskmanager.memory.network.max: 64m
-  taskmanager.memory.jvm-metaspace.size: 320m
+  taskmanager.memory.jvm-metaspace.size: 512m
   taskmanager.memory.jvm-overhead.min: 64m
   taskmanager.memory.jvm-overhead.max: 64m
   parallelism.default: 1
   ```
-  plus the separate env var `FLINK_ENV_JAVA_OPTS_TM: "-XX:+UseSerialGC -XX:TieredStopAtLevel=1 -XX:ReservedCodeCacheSize=48m -Xss512k"`.
+  plus the separate env var `FLINK_ENV_JAVA_OPTS_TM: "-XX:+UseSerialGC -XX:TieredStopAtLevel=1 -XX:ReservedCodeCacheSize=48m -Xss512k -Dorg.apache.beam.vendor.grpc.v1p69p0.io.netty.allocator.numDirectArenas=1"` (one line, exactly these five flags).
 - JVM flags are **not** passed via `FLINK_PROPERTIES`: the image entrypoint deletes all whitespace from each `FLINK_PROPERTIES` line (`tr -d '[:space:]'`), so a multi-flag value becomes one invalid flag that `-XX:+IgnoreUnrecognizedVMOptions` silently drops (verified 2026-10-03). `bin/config.sh` reads `FLINK_ENV_JAVA_OPTS_JM/_TM/_CLI` from the environment instead. Do not set `FLINK_ENV_JAVA_OPTS` itself (it would bypass `env.java.default-opts.all`).
 - Why these values (measured, do not "optimise" further): `taskmanager.memory.managed.size` must **not** be 0. With 0, Flink SQL HOP and SESSION window aggregations fail with `NullPointerException: Initial Segment may not be null` (verified). 96m is enough for the course workload. `taskmanager.memory.jvm-metaspace.size` is **320m** (Rev. 10; process size raised by the same 160m so the heap is unchanged): every Beam job loads the Flink job-server classes into its own classloader (~55 MB metaspace each); with 160m a second concurrent Beam job crashed the TaskManager with `OutOfMemoryError: Metaspace` (verified). Metaspace is only committed when used, so idle RSS is unchanged. JVM flags: serial GC, C1-only JIT and a capped code cache, because throughput is irrelevant at 5 rows/s.
+- **Revision 14, TaskManager limits for Beam (measured 2026-11-15, do not change without re-measuring):** A cancelled Beam streaming job never releases its classloader in the TaskManager. The Java SDK harness of the `EMBEDDED` environment keeps threads alive after the cancel (a `processBundle` thread waiting for data, the Kafka producer network thread, gRPC threads); a forced full GC does not unload the classes. Every such job therefore keeps ≈ 52 MB of metaspace, and its own copy of Beam's vendored gRPC Netty keeps pooled direct buffers. A finished batch job (wordcount, ≈ 42 MB) is unloaded later under metaspace pressure. Beam itself cannot be patched here, so the limits give headroom instead:
+  - **Direct memory was the real cause of the failures seen in Rev. 13.** `-XX:MaxDirectMemorySize` is framework off-heap + task off-heap + network = 32 + 0 + 64 = 96 MB, and Flink's own network buffers already use 73 MB of it. Each Beam job added ≈ 8 MB; the third or fourth Beam streaming job hit the limit (`OutOfMemoryError: Cannot reserve 2097152 bytes of direct buffer memory (allocated: 100384129, limit: 100663296)` in a gRPC thread), stopped receiving its bundle descriptors, wrote nothing and failed after 3 min with `No client connected within timeout`.
+  - `taskmanager.memory.task.off-heap.size: 64m` raises the direct limit to 160 MB.
+  - `-Dorg.apache.beam.vendor.grpc.v1p69p0.io.netty.allocator.numDirectArenas=1` limits the pooled direct arenas of Beam's vendored Netty (the relocated property name was verified in the job-server jar). Measured growth is now 2–3 MB of direct memory per Beam job instead of ≈ 8 MB.
+  - `taskmanager.memory.jvm-metaspace.size: 512m` (was 320m). `taskmanager.memory.process.size` grows by the same 192m + 64m to **1312m**, so the heap (480 MB) is unchanged.
+  - Result (measured, one TaskManager lifetime, example 02 running): wordcount + **8** Beam streaming jobs started and cancelled one after the other all produced output; the 9th hit the metaspace limit and the TaskManager restarted. Before: wordcount + 3. TaskManager RSS grew from 0.88 GB (first streaming job) to 1.41 GB (eighth), i.e. 70–80 MB per job; `mem_limit` is therefore **1792m** (only ≈ 120 MB of margin would be left at 1536m).
+  - Metaspace and direct memory are only committed when used, so the RSS of the core stack and of the normal course sequence (four Beam jobs) is unchanged by the higher limits.
 - `sql-client` (`command: ["sleep", "infinity"]`):
   ```
   jobmanager.rpc.address: jobmanager
@@ -223,7 +231,7 @@ Do **not** touch the empty directory `flink-sql-cli-docker`; it is a git submodu
 - There is no permanent worker-pool or expansion-service container. Everything Beam needs runs inside **`beam-client`**, and only while a pipeline runs:
   - The pipeline's Python process doubles as the **Python SDK worker** (`--environment_type=LOOPBACK`).
   - The Python FlinkRunner starts the **Flink job-server JVM** from the jar (`--flink_job_server_jar`).
-  - `ReadFromKafka`/`WriteToKafka` start a **short-lived Java expansion-service JVM** from the slim expansion-service app plus the KafkaIO classpath jars (`JavaJarExpansionService(..., classpath=[...])`) during pipeline construction.
+  - `ReadFromKafka`/`WriteToKafka` each start a **short-lived Java expansion-service JVM** from the slim expansion-service app plus the KafkaIO classpath jars (`JavaJarExpansionService(..., classpath=[...])`) during pipeline construction.
 - LOOPBACK means the TaskManager connects back to the worker at `localhost:<port>`. Therefore `beam-client` uses **`network_mode: "service:taskmanager"`**, sharing the TaskManager's network stack.
   - Consequences: no `ports:` and no `hostname:` on `beam-client`. It still resolves `jobmanager` and `kafka`. If the TaskManager is restarted, restart `beam-client` too (document this in the README troubleshooting).
 - **Java cross-language transforms** (KafkaIO) run with environment type **`EMBEDDED`**, i.e. inside the TaskManager JVM, using the classes of the Flink job-server jar (which Flink ships as the job jar). Verified 2026-10-03: no Java `boot` binary, no artifact retrieval and no second JVM are needed. (`PROCESS` failed: the job server's artifact files live in `beam-client`'s filesystem, and streaming them to the TaskManager overflows its 96 MB direct-memory limit.)
@@ -260,7 +268,24 @@ Do **not** touch the empty directory `flink-sql-cli-docker`; it is a git submodu
   (`from apache_beam.options.pipeline_options import PipelineOptions`, `from apache_beam.transforms.external import JavaJarExpansionService`.) `{{PORT}}` is Beam's placeholder for the port it picks.
 - **Code structure of both pipeline scripts:**
   - Standard imports (`import json`, `import re`, `import typing`, `import apache_beam as beam`, `from apache_beam.transforms import window`, `from apache_beam.io.kafka import ReadFromKafka, WriteToKafka`, `from common import flink_options, kafka_expansion_service`, …).
-  - A `run()` function containing `with beam.Pipeline(options=...) as p:` and `if __name__ == "__main__": run()`. The context manager blocks until the job ends. For the streaming script that is "forever", and the LOOPBACK worker lives in this process, so it must keep running (started with `docker compose exec -d`).
+  - A `run()` function and `if __name__ == "__main__": run()`.
+    - **`wordcount.py`** (no Kafka transforms) uses `with beam.Pipeline(options=...) as p:`. The context manager blocks until the job ends.
+    - **The two Kafka streaming scripts do NOT use the `with` form (Revision 14).** `Pipeline.__enter__` calls `SubprocessServer.cache_subprocesses()`, which keeps the expansion-service JVM (≈ 0.25 GB) alive until `__exit__`, i.e. for the whole run of a streaming job. They use this structure instead:
+      ```python
+      # Kein "with beam.Pipeline(...)": Damit bliebe die Java-Hilfs-JVM (Expansion Service) der Kafka-Transforms
+      # bis zum Ende des Jobs im Speicher (ca. 0.25 GB). So lebt sie nur, waehrend die Pipeline gebaut wird.
+      p = beam.Pipeline(options=options)
+      (
+          p
+          | "ReadFromKafka" >> ReadFromKafka(...)
+          ...
+          | "WriteToKafka" >> WriteToKafka(...)
+      )
+      # Job an Flink uebergeben und warten: Dieser Prozess ist der Python-Worker (LOOPBACK) und muss weiterlaufen.
+      p.run().wait_until_finish()
+      ```
+      Without the cache, each of the two Kafka transforms starts and stops its own expansion-service JVM while it is applied (two short JVM starts, verified: the job is RUNNING ≈ 25 s after the command). The transforms, their labels, arguments and order stay exactly as they are; only the indentation of the pipeline expression changes (one level less).
+    - For the streaming scripts `wait_until_finish()` blocks "forever", and the LOOPBACK worker lives in this process, so it must keep running (started with `docker compose exec -d`).
   - The formatting DoFn in `kafka_window_count.py` implements `process(self, element, window=beam.DoFn.WindowParam)`.
   - Keep the regex `[A-Za-z']+` exactly (the input has no umlauts).
 - **`beam/pipelines/wordcount.py`** (batch, `flink_options(streaming=False)`):
@@ -471,6 +496,7 @@ beam/data/output/
 - **G4** – `examples/01…05` and `run-example.sh` (§4).
 - **G5** – `beam/Dockerfile`, `beam/pipelines/common.py`, `wordcount.py`, `kafka_window_count.py`, `beam/data/input.txt` (§3.5, §3.6, lean LOOPBACK setup).
 - **G6** – `README.md` and deletion of `img/` (§5).
+- **G8** (Revision 14) – `docker-compose.yml` (only the `taskmanager` service: `mem_limit`, `FLINK_PROPERTIES`, `FLINK_ENV_JAVA_OPTS_TM`, §3.1/§3.2) and `beam/pipelines/kafka_window_count.py`, `beam/pipelines/kafka_window_triggers.py` (pipeline structure without `with`, §3.6). `common.py`, `wordcount.py`, the Dockerfiles and all other services stay unchanged. README and DESIGN are updated by the elephant.
 
 ## 7. Rules for implementers
 - Only create, modify or delete files inside this repository, and only those named in your task card.
@@ -502,4 +528,8 @@ beam/data/output/
 - Revision 11 (2026-11-14): `customer` is drawn from a fixed list of 20 first names instead of `#{Name.firstName}` (examples 01, 02, 05). With random names every SESSION window held exactly one order, which made the session example useless for teaching. README: course notes (example 02 keeps running, interactive client starts without tables) and a "Harmless Log Noise" troubleshooting entry.
 - Revision 12 (2026-11-15): README only, no code change. Course day 3 runs the Beam examples in sequence so that at most two Beam streaming jobs run at once: `kafka_window_count.py`, cancel it in the Flink UI, then `kafka_window_triggers.py` (accumulating) and, as a second job, `--mode discarding`. Verified: cancelling a Beam job in the Flink UI ends its Python worker (beam-client back to ≈ 0.3 GB); with example 02 and both trigger jobs the stack uses ≈ 2.8 GB, no OOM, no restarts. README now states the waiting times (first panes after 1–2 min, a complete EARLY/ON_TIME/LATE sequence after 3–4 min), that both modes share one topic (field `mode`), UTC timestamps, and the harmless Beam log lines.
 - Revision 13 (2026-11-15): README only, no code change; corrects Rev. 12. Measurements on this revision: one Beam streaming pipeline ≈ 0.75 GB in beam-client (Python worker 0.19 GB, job server 0.35–0.39 GB, expansion service 0.23–0.25 GB; the expansion service stays alive for the whole pipeline run), so two pipelines sit at the 1.5 GB limit (cgroup `memory.current` 1.47–1.53 GB, hundreds of limit events, swap). TaskManager metaspace is not released after a Beam job ends: 97 MB (wordcount + one streaming job) → 149 → 202 → 214 → 250 → 275 → 301 MB over six start/cancel cycles; the fifth to seventh Beam job failed and the eighth restarted the TaskManager (limit 320 MB). One of six runs with two concurrent trigger pipelines failed after 3 min with `No client connected within timeout` followed by a fatal `NoClassDefFoundError ... Workarounds` in the TaskManager (cause not established). The course sequence is therefore: one Beam streaming job at a time, and a fresh stack (`down -v`, `up`, example 02) before the trigger part. Open design questions for a later revision: stop the expansion service after pipeline construction; avoid the per-job classloader (job-server jar on the TaskManager classpath) or raise the metaspace limit.
-
+- Revision 14 (2026-11-15): Beam memory. Diagnosis with `jcmd` (JDK copied into the TaskManager container for the test): the classloader of every cancelled Beam streaming job stays in the TaskManager (threads of the embedded Java SDK harness), and the failures of Rev. 13 were direct-memory exhaustion, not metaspace (details in §3.2). Changes: (1) TaskManager: `task.off-heap.size: 64m`, metaspace 512m, process size 1312m, `mem_limit` 1792m, `-D…netty.allocator.numDirectArenas=1`. (2) `kafka_window_count.py` and `kafka_window_triggers.py` no longer use `with beam.Pipeline(...)`, so the expansion-service JVM ends after pipeline construction (§3.6). Verified on the changed repo:
+  - Course sequence in one stack, without a restart in between: example 02, wordcount (13 lines, `ist: 6`), `kafka_window_count.py` (RUNNING after ≈ 25 s, 5 lines after 90 s), cancel, triggers accumulating (window 13:32 UTC, Laptop: EARLY 49 → ON_TIME 113 → LATE 114), cancel, triggers discarding (window 13:36, Keyboard: EARLY 55 → ON_TIME 63 → LATE 1).
+  - Stress in the same TaskManager lifetime: two trigger jobs at once (both wrote; beam-client 0.97 GB), then three more streaming jobs: 8 streaming jobs + wordcount, all with output, no `OutOfMemoryError`, no restart. Metaspace 478 MB, direct memory 90 MB of 160 MB, TaskManager RSS 1.41 GB after the eighth. With the same settings a prototype run showed the ninth streaming job hitting the metaspace limit (TaskManager restart).
+  - Memory: beam-client ≈ 0.52 GB per streaming pipeline (was ≈ 0.75 GB): Python ≈ 0.18 GB + job server ≈ 0.4 GB. `--profile all` with SQL examples 01–05 (02, 04, 05 running), console, Schema Registry, Postgres (15 rows) and one Beam streaming pipeline: 2.79 GB in total, no TaskManager restart.
+  - Not fixed: the classloader leak itself (inside Beam's embedded harness). Not tested: Docker Desktop limited to 4–6 GB, Windows, amd64.
