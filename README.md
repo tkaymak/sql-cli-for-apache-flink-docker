@@ -83,7 +83,12 @@ Kompakte Schritt-für-Schritt-Anleitung für die Übungen im CAS Data Engineerin
      docker compose exec kafka /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server localhost:9092 --topic beam_product_counts --from-beginning
      ```
    - **Triggers & Akkumulation (Kurstag 3):**
-     Höchstens zwei Beam-Streaming-Jobs gleichzeitig laufen lassen. Deshalb zuerst den Fenster-Job von oben beenden: Flink Web UI → *Running Jobs* → Job `BeamApp-root-…` öffnen → *Cancel Job*.
+     Immer nur **einen** Beam-Streaming-Job gleichzeitig laufen lassen (jeder braucht rund 0.7 GB), und nach höchstens vier Beam-Jobs den Stack neu starten (siehe [Several Beam Pipelines at Once](#several-beam-pipelines-at-once)). Am einfachsten deshalb vor diesem Teil frisch beginnen:
+     ```bash
+     docker compose --profile all down -v
+     docker compose --profile beam up -d
+     ./run-example.sh examples/02_faker_to_kafka_json.sql
+     ```
 
      Streaming-Pipeline mit Triggern im Hintergrund (`-d`) ausführen (Beispiel 02 muss laufen):
      ```bash
@@ -95,12 +100,12 @@ Kompakte Schritt-für-Schritt-Anleitung für die Übungen im CAS Data Engineerin
      ```
      Die ersten Zeilen erscheinen nach 1 bis 2 Minuten. Ein Fenster dauert 120 Sekunden; das volle Bild mit `EARLY`, `ON_TIME` und `LATE` für dasselbe Fenster ist deshalb erst nach 3 bis 4 Minuten da. `window_start` und `window_end` sind in UTC.
 
-     Danach denselben Job zusätzlich im Discarding-Modus starten und dieselben Fenster vergleichen. Beide Jobs schreiben in dasselbe Topic; das Feld `mode` unterscheidet sie:
+     Danach den Job beenden (Flink Web UI → *Running Jobs* → Job `BeamApp-root-…` öffnen → *Cancel Job* → *Yes*) und im Discarding-Modus neu starten. Beide Läufe schreiben in dasselbe Topic; das Feld `mode` unterscheidet sie. Wieder 3 bis 4 Minuten warten, dann lesen:
      ```bash
      docker compose exec -d beam-client python kafka_window_triggers.py --mode discarding
      docker compose exec kafka /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server localhost:9092 --topic beam_window_triggers --from-beginning | grep discarding
      ```
-     Frühe (`EARLY`), pünktliche (`ON_TIME`) und verspätete (`LATE`) Panes feuern separat anhand von Event-Time-Wasserzeichen und Verarbeitungszeit. Im Modus `accumulating` summieren Folge-Panes frühere Werte auf, während `discarding` nur die jeweils neu hinzugekommenen Elemente ausgibt. Beispiel für ein Fenster und ein Produkt (gemessen am 15.11.2026):
+     Frühe (`EARLY`), pünktliche (`ON_TIME`) und verspätete (`LATE`) Panes feuern separat anhand von Event-Time-Wasserzeichen und Verarbeitungszeit. Im Modus `accumulating` summieren Folge-Panes frühere Werte auf, während `discarding` nur die jeweils neu hinzugekommenen Elemente ausgibt. Beispielwerte für ein Fenster und ein Produkt (gemessen am 15.11.2026):
 
      | Pane | `accumulating` | `discarding` |
      |---|---|---|
@@ -382,7 +387,7 @@ Instead of running separate worker-pool or persistent expansion-service containe
    docker compose exec -d beam-client python kafka_window_triggers.py
    ```
    *(Or run with discarding mode: `docker compose exec -d beam-client python kafka_window_triggers.py --mode discarding`.)*
-   - Both modes write to the same topic; the JSON field `mode` tells them apart (append `| grep discarding` to the consumer command). Start `accumulating` first, then `discarding` as a second job, and compare the same window. Cancel other Beam streaming jobs first (see [Several Beam Pipelines at Once](#several-beam-pipelines-at-once)).
+   - Both modes write to the same topic; the JSON field `mode` tells them apart (append `| grep discarding` to the consumer command). Run one mode, cancel the job in the Flink UI (*Cancel Job* → *Yes*), then run the other mode and compare the counts. Run only one Beam streaming job at a time (see [Several Beam Pipelines at Once](#several-beam-pipelines-at-once)).
    - The first panes arrive after 1–2 minutes; a complete `EARLY` → `ON_TIME` → `LATE` sequence for one window takes 3–4 minutes (120 s window). `window_start` / `window_end` are UTC.
    - Consumes new JSON order events from Kafka `orders` topic using KafkaIO (`auto.offset.reset: latest`).
    - Assigns event-time timestamps from `order_time` and computes 120-second fixed window counts per product.
@@ -408,7 +413,19 @@ docker compose up -d --force-recreate beam-client
 
 ### Several Beam Pipelines at Once
 
-Each running Beam streaming pipeline needs about 0.4 GB in `beam-client` (Python worker + job server) and about 55 MB JVM metaspace in the TaskManager (configured for up to ~4 Beam jobs). On an 8 GB laptop run at most two Beam streaming pipelines at the same time; stop the others with `docker compose restart beam-client` or cancel them in the Flink UI.
+Two limits apply (measured 2026-11-15):
+
+- **One Beam streaming pipeline at a time.** Each running pipeline keeps three processes alive in `beam-client` (Python worker, Flink job server, Kafka expansion service), together about 0.75 GB. Two pipelines use about 1.45 GB of the 1.5 GB container limit and only fit by swapping.
+- **At most four Beam jobs per TaskManager lifetime** (batch and streaming, finished or cancelled ones included). Every Beam job leaves 25–50 MB of JVM metaspace behind in the TaskManager. From about the fifth job on, new Beam jobs fail; around the eighth the TaskManager hits its 320 MB metaspace limit and restarts, which fails all running jobs.
+
+Stop a pipeline before starting the next one: Flink Web UI → *Running Jobs* → open the `BeamApp-root-…` job → *Cancel Job* → *Yes*. Cancelling the job also ends its processes in `beam-client`. Starting the same pipeline again resumes from its committed Kafka offsets, so the trigger example then prints many `LATE` panes for the orders it missed.
+
+If a Beam job writes nothing for four minutes (seen once: it then failed with `No client connected within timeout` and the TaskManager restarted), if jobs show `FAILED`, or after four Beam jobs, start fresh:
+```bash
+docker compose --profile all down -v
+docker compose --profile beam up -d
+./run-example.sh examples/02_faker_to_kafka_json.sql
+```
 
 ### JobManager Restarts & Lost Jobs (No HA)
 
